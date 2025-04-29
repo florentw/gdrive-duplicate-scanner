@@ -7,6 +7,16 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import sys
+from collections import defaultdict
+import csv
+from datetime import datetime, timedelta
+import json
+import hashlib
+from functools import lru_cache
+from googleapiclient.http import BatchHttpRequest
+from typing import List, Dict, Set, Optional, Any, Callable
+from googleapiclient.discovery import Resource
+import time
 
 # Configure logging to write logs to a file and the console
 log_format = '%(asctime)s - %(levelname)s - %(message)s'
@@ -19,100 +29,716 @@ logging.getLogger().addHandler(console_handler)
 # If modifying these SCOPES, delete the file token.pickle.
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
+# Add CSV headers as a constant
+CSV_HEADERS = [
+    'File Name',
+    'Full Path',
+    'Size (Bytes)',
+    'Size (Human Readable)',
+    'File ID',
+    'MD5 Checksum',
+    'Duplicate Group ID',
+    'Parent Folder',
+    'Parent Folder ID',
+    'Duplicate File Name',
+    'Duplicate File Path',
+    'Duplicate File Size',
+    'Duplicate File ID'
+]
+
+# Add these constants near the top of the file with other constants
+CACHE_FILE = 'drive_metadata_cache.json'
+CACHE_EXPIRY_HOURS = 24  # Cache expires after 24 hours
+SAVE_INTERVAL_MINUTES = 5  # Save every 5 minutes if modified
+BATCH_SIZE = 100  # Reduced from 900 to 100 to stay well under Google's limits
+MAX_RETRIES = 3
+RETRY_DELAY = 1  # seconds
+METADATA_FIELDS = 'id, name, parents, size, md5Checksum, mimeType, trashed'
+
+def get_cache_key():
+    """Generate a unique cache key based on the credentials file."""
+    try:
+        with open('credentials.json', 'rb') as f:
+            content = f.read()
+            # Use first 8 characters of hash to identify the account
+            return hashlib.md5(content).hexdigest()[:8]
+    except FileNotFoundError:
+        return 'default'
+
+class MetadataCache:
+    """Centralized cache manager for file metadata."""
+    
+    def __init__(self):
+        self._cache = {}
+        self._last_save = datetime.now()
+        self._modified = False
+        self._load()
+
+    def _load(self) -> None:
+        """Load cache from disk if valid."""
+        if not os.path.exists(CACHE_FILE):
+            logging.info("No cache file found, starting fresh")
+            self._cache = {}
+            return
+
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                data = json.load(f)
+
+            # Skip if cache is expired or invalid
+            cache_time = datetime.fromisoformat(data.get('timestamp', '2000-01-01'))
+            if datetime.now() - cache_time > timedelta(hours=CACHE_EXPIRY_HOURS):
+                logging.info("Cache has expired, starting fresh")
+                self._cache = {}
+                return
+                
+            if data.get('cache_key') != get_cache_key():
+                logging.info("Cache key mismatch, starting fresh")
+                self._cache = {}
+                return
+
+            # The cache structure is {"files": {"all_files": [...], ...}}
+            files_data = data.get('files', {})
+            if not files_data:
+                logging.info("Empty cache data, starting fresh")
+                self._cache = {}
+                return
+
+            self._cache = files_data
+            if self._cache:
+                cached_files = self._cache.get('all_files', [])
+                logging.info(f"Loaded cache with {len(cached_files)} files")
+            else:
+                logging.info("No valid data in cache, starting fresh")
+
+        except Exception as e:
+            logging.error(f"Failed to load cache: {e}")
+            self._cache = {}
+
+    def _save(self, force: bool = False) -> None:
+        """Save cache to disk if needed."""
+        if not (self._modified or force):
+            return
+
+        if not force and datetime.now() - self._last_save < timedelta(minutes=SAVE_INTERVAL_MINUTES):
+            return
+
+        try:
+            data = {
+                'timestamp': datetime.now().isoformat(),
+                'cache_key': get_cache_key(),
+                'files': self._cache
+            }
+            with open(CACHE_FILE, 'w') as f:
+                json.dump(data, f)
+            
+            self._last_save = datetime.now()
+            self._modified = False
+            cached_files = self._cache.get('all_files', [])
+            logging.info(f"Saved cache with {len(cached_files)} files")
+
+        except Exception as e:
+            logging.error(f"Failed to save cache: {e}")
+
+    def get(self, key: str) -> Any:
+        """Retrieve item from cache."""
+        return self._cache.get(key)
+
+    def set(self, key: str, value: Any) -> None:
+        """Store single item in cache."""
+        self._cache[key] = value
+        self._modified = True
+        self._save()
+
+    def update(self, items: Dict[str, Any]) -> None:
+        """Store multiple items in cache."""
+        self._cache.update(items)
+        self._modified = True
+        self._save()
+
+    def remove(self, keys: List[str]) -> None:
+        """Remove multiple items from cache."""
+        for key in keys:
+            self._cache.pop(key, None)
+        self._modified = True
+        self._save()
+
+    def clear(self) -> None:
+        """Clear all items from cache."""
+        self._cache.clear()
+        self._modified = True
+        self._save(force=True)
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, *_):
+        """Context manager exit - ensure cache is saved."""
+        if self._modified:
+            self._save(force=True)
+
+# At the top level, keep the global instance
+metadata_cache = MetadataCache()
+
+def get_human_readable_size(size_bytes):
+    """Convert size in bytes to human readable format."""
+    try:
+        size_bytes = int(size_bytes)  # Ensure size_bytes is an integer
+        if not isinstance(size_bytes, (int, float)) or size_bytes < 0:
+            return "Unknown size"
+        
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.2f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.2f} PB"
+    except (ValueError, TypeError):
+        return "Unknown size"
 
 def get_service():
     """Authorize and return Google Drive service."""
     creds = None
     if os.path.exists('token.json'):
-        with open('token.json', 'rb') as token:
-            creds = pickle.load(token)
+        try:
+            with open('token.json', 'rb') as token:
+                creds = pickle.load(token)
+        except (pickle.PickleError, IOError) as e:
+            logging.error(f"Error loading credentials: {e}")
+            creds = None
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'wb') as token:
-            pickle.dump(creds, token)
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                logging.error(f"Error refreshing credentials: {e}")
+                creds = None
+        
+        if not creds:
+            try:
+                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+                with open('token.json', 'wb') as token:
+                    pickle.dump(creds, token)
+            except Exception as e:
+                logging.error(f"Error creating new credentials: {e}")
+                raise SystemExit("Failed to authenticate with Google Drive")
+
     return build('drive', 'v3', credentials=creds)
 
+class BatchHandler:
+    """Generic handler for batching Google Drive API requests."""
+    
+    def __init__(self, service: Resource, cache: MetadataCache):
+        """Initialize batch handler.
+        
+        Args:
+            service: Google Drive API service instance
+            cache: MetadataCache instance
+        """
+        self.service = service
+        self.cache = cache
+        self.batch = service.new_batch_http_request()
+        self.results = {}
+        self.count = 0
+        self._updates = {}
+        self._removals = []
 
-def move_file_to_trash(service, file):
-    """Move the given file to trash."""
+    def add_metadata_request(self, file_id: str) -> None:
+        """Add metadata fetch request to batch."""
+        # Check cache first
+        cached = self.cache.get(file_id)
+        if cached:
+            self.results[file_id] = cached
+            return
+
+        if self.count >= BATCH_SIZE:
+            self.execute()
+
+        def callback(_, response, exception):
+            if exception:
+                logging.warning(f"Failed to fetch metadata for {file_id} in batch: {exception}")
+                self.results[file_id] = None
+            else:
+                self.results[file_id] = response
+                self._updates[file_id] = response
+
+        self.batch.add(
+            self.service.files().get(fileId=file_id, fields='*'),
+            callback=callback
+        )
+        self.count += 1
+
+    def add_trash_request(self, file_id: str) -> None:
+        """Add trash move request to batch."""
+        # Execute current batch if we've reached the limit
+        if self.count >= BATCH_SIZE:
+            self.execute()
+
+        def callback(_, response, exception):
+            if exception:
+                logging.error(f"Failed to trash file {file_id}: {exception}")
+                self.results[file_id] = False
+            else:
+                self.results[file_id] = True
+                self._removals.append(file_id)
+
+        self.batch.add(
+            self.service.files().update(fileId=file_id, body={'trashed': True}),
+            callback=callback
+        )
+        self.count += 1
+
+    def execute(self) -> None:
+        """Execute batch requests if any pending."""
+        if not self.count:
+            return
+
+        try:
+            self.batch.execute()
+        
+            # Update cache
+            if self._updates:
+                self.cache.update(self._updates)
+            if self._removals:
+                self.cache.remove(self._removals)
+
+        except Exception as e:
+            logging.error(f"Batch execution failed: {e}")
+        finally:
+            # Reset state
+            self.batch = self.service.new_batch_http_request()
+            self.count = 0
+            self._updates.clear()
+            self._removals.clear()
+
+class DriveAPI:
+    """Simplified Google Drive API wrapper with caching."""
+    
+    def __init__(self, service: Resource):
+        self.service = service
+        self.cache = metadata_cache  # Use the global instance instead of creating a new one
+    
+    def list_files(self, force_refresh: bool = False) -> List[Dict]:
+        """List all files in Drive with caching."""
+        if not force_refresh:
+            cached = self.cache.get('all_files')
+            if cached:
+                logging.info(f"Using cached list of {len(cached)} files")
+                return cached
+        
+        files = []
+        page_token = None
+        
+        try:
+            while True:
+                response = self.service.files().list(
+                    q="trashed = false",
+                    pageSize=1000,
+                    fields="nextPageToken, files(id, name, size, md5Checksum, trashed, parents)",
+                    pageToken=page_token
+                ).execute()
+                
+                batch = response.get('files', [])
+                files.extend(batch)
+                logging.info(f"Retrieved {len(files)} files")
+                
+                page_token = response.get('nextPageToken')
+                if not page_token:
+                    break
+            
+            self.cache.set('all_files', files)
+            logging.info(f"Cached {len(files)} files")
+            return files
+            
+        except Exception as e:
+            logging.error(f"Failed to fetch files: {e}")
+            cached = self.cache.get('all_files')
+            if cached:
+                logging.info(f"Using cached data as fallback ({len(cached)} files)")
+                return cached
+            raise
+    
+    def batch_operation(self) -> BatchHandler:
+        """Create a new batch operation."""
+        return BatchHandler(self.service, self.cache)
+
+def get_file_metadata(service, file_id: str) -> Optional[dict]:
+    """Get file metadata with caching."""
+    if not file_id:
+        return None
+
+    # Check cache first
+    cached_metadata = metadata_cache.get(file_id)
+    if cached_metadata is not None:
+        return cached_metadata
+
     try:
-        service.files().update(fileId=file['id'], body={'trashed': True}).execute()
-        logging.info(f"Moved file {file['name']} with id {file['id']} to trash")
+        metadata = service.files().get(
+            fileId=file_id,
+            fields=METADATA_FIELDS
+        ).execute()
+        metadata_cache.set(file_id, metadata)
+        return metadata
     except Exception as e:
-        logging.error(f"An error occurred: {e}")
+        logging.error(f"Error getting file metadata for {file_id}: {e}")
+        return None
 
+def get_files_metadata_batch(drive_api: DriveAPI, file_ids: list[str]) -> Dict[str, dict]:
+    """Get metadata for multiple files in batches with retry logic."""
+    results = {}
+    failed_ids = set()
+    
+    # Process files in smaller batches
+    for i in range(0, len(file_ids), BATCH_SIZE):
+        batch_ids = file_ids[i:i + BATCH_SIZE]
+        logging.info(f"Processing batch {i//BATCH_SIZE + 1} of {(len(file_ids) + BATCH_SIZE - 1)//BATCH_SIZE}")
+        
+        handler = BatchHandler(drive_api.service, drive_api.cache)
+        for file_id in batch_ids:
+            handler.add_metadata_request(file_id)
+        
+        # Execute the batch
+        handler.execute()
+        
+        # Check for failed requests
+        for file_id in batch_ids:
+            if file_id not in handler.results or handler.results[file_id] is None:
+                failed_ids.add(file_id)
+            else:
+                results[file_id] = handler.results[file_id]
+    
+    # Retry failed requests individually
+    if failed_ids:
+        logging.info(f"Retrying {len(failed_ids)} failed requests")
+        for file_id in failed_ids:
+            retries = 0
+            while retries < MAX_RETRIES:
+                try:
+                    metadata = drive_api.service.files().get(
+                        fileId=file_id,
+                        fields='*'
+                    ).execute()
+                    results[file_id] = metadata
+                    break
+                except Exception as e:
+                    retries += 1
+                    if retries == MAX_RETRIES:
+                        logging.error(f"Failed to fetch metadata for {file_id} after {MAX_RETRIES} retries: {e}")
+                    else:
+                        logging.warning(f"Retry {retries} for {file_id}")
+                        time.sleep(RETRY_DELAY)
+    
+    return results
 
-def fetch_all_files(service):
-    """Fetch all file metadata from Google Drive and return as a list."""
-    all_files = []
-    page_token = None
-    retrieved_files = 0
-    while True:
-        response = service.files().list(
-            q="trashed = false",
-            pageSize=1000, fields="nextPageToken, files(id, name, size, md5Checksum, trashed)",
-            pageToken=page_token).execute()
-        all_files.extend(response.get('files', []))
-        logging.info(f"Retrieved {retrieved_files + 1000} file's metadata so far")
-        retrieved_files += 1000
-        page_token = response.get('nextPageToken', None)
-        if page_token is None:
-            break
-    return all_files
+def move_files_to_trash_batch(drive_api: DriveAPI, file_ids: list[str]) -> Dict[str, bool]:
+    """Move multiple files to trash in batches."""
+    results = {}
+    
+    # Process files in smaller batches
+    for i in range(0, len(file_ids), BATCH_SIZE):
+        batch_ids = file_ids[i:i + BATCH_SIZE]
+        handler = BatchHandler(drive_api.service, drive_api.cache)  # Use drive_api.service instead of drive_api
+        
+        for file_id in batch_ids:
+            handler.add_trash_request(file_id)
+        
+        # Execute the batch
+        handler.execute()
+        results.update(handler.results)
+    
+    return results
 
+def handle_duplicate(drive_api: DriveAPI, file1: dict, file2: dict, duplicate_folders: Dict[str, Set[str]], delete: bool = False) -> None:
+    """Handle a duplicate file pair with batched metadata fetching."""
+    # Get metadata for both files in a single batch
+    metadata = get_files_metadata_batch(drive_api, [file1['id'], file2['id']])
+    
+    file1_meta = metadata.get(file1['id'])
+    file2_meta = metadata.get(file2['id'])
+    
+    if not file1_meta or not file2_meta:
+        logging.error(f"Could not fetch metadata for one or both files: {file1['id']}, {file2['id']}")
+        return
 
-def handle_duplicate(service, file1, file2, delete=False):
-    """Log the duplicate and handle deletion if necessary."""
-    logging.info(f"Duplicate found: {file1['name']} (ID: {file1['id']}) and {file2['name']} (ID: {file2['id']})")
+    # Update duplicate folders tracking
+    for parent in file1_meta.get('parents', []):
+        duplicate_folders[parent].add(file1_meta['id'])
+    for parent in file2_meta.get('parents', []):
+        duplicate_folders[parent].add(file2_meta['id'])
+
+    # Log the duplicate
+    file1_size = get_human_readable_size(int(file1_meta.get('size', 0)))
+    file2_size = get_human_readable_size(int(file2_meta.get('size', 0)))
+    
+    logging.info(f"Found duplicate files:")
+    logging.info(f"  1: {file1_meta['name']} (Size: {file1_size})")
+    logging.info(f"  2: {file2_meta['name']} (Size: {file2_size})")
+
     if delete:
-        if file1['name'] != file2['name']:
-            print(f"\nFound files with different names but same content:\n1. {file1['name']} "
-                  f"(ID: {file1['id']})\n2. {file2['name']} (ID: {file2['id']})")
-
-            choice = input("Enter 1 to move the first file to trash, "
-                           "2 to move the second file to trash (or any other key to skip): ")
-            if choice == '1':
-                move_file_to_trash(service, file1)
-
-            elif choice == '2':
-                move_file_to_trash(service, file2)
-
+        print(f"\nDuplicate files found:")
+        print(f"1: {file1_meta['name']} (Size: {file1_size})")
+        print(f"2: {file2_meta['name']} (Size: {file2_size})")
+        
+        while True:
+            choice = input("\nWhich file would you like to delete? (1/2/s to skip): ").lower()
+            if choice == 's':
+                break
+            elif choice in ('1', '2'):
+                file_to_delete = file1_meta if choice == '1' else file2_meta
+                result = move_files_to_trash_batch(drive_api, [file_to_delete['id']])
+                if result.get(file_to_delete['id']):
+                    print(f"File moved to trash: {file_to_delete['name']}")
+                else:
+                    print(f"Error moving file to trash: {file_to_delete['name']}")
+                break
             else:
-                logging.info(f"No action was taken for duplicates files: "
-                             f"{file1['name']} with id {file1['id']} and {file2['name']} with id {file2['id']}.")
-        else:
-            move_file_to_trash(service, file1)
+                print("Invalid choice. Please enter 1, 2, or s.")
 
+def generate_csv_filename():
+    """Generate a CSV filename with timestamp."""
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return f'drive_duplicates_{timestamp}.csv'
 
-def find_duplicates(service, delete=False):
-    """Find duplicate files in Google Drive."""
-    all_files = fetch_all_files(service)
+def write_to_csv(duplicate_pairs, service):
+    """Write duplicate file information to CSV with minimal API calls."""
+    csv_filename = generate_csv_filename()
+    duplicate_group_id = 1
+    
+    with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=CSV_HEADERS)
+        writer.writeheader()
+        
+        for file1, file2 in duplicate_pairs:
+            # Get complete metadata for both files
+            file1_meta = get_file_metadata(service, file1['id'])
+            file2_meta = get_file_metadata(service, file2['id'])
+            
+            if not file1_meta or not file2_meta:
+                continue
+
+            def prepare_file_row(file_meta, duplicate_meta):
+                parent_id = file_meta.get('parents', [''])[0]
+                return {
+                    'File Name': file_meta['name'],
+                    'Full Path': f"{parent_id}/{file_meta['name']}",
+                    'Size (Bytes)': file_meta.get('size', '0'),
+                    'Size (Human Readable)': get_human_readable_size(int(file_meta.get('size', 0))),
+                    'File ID': file_meta['id'],
+                    'MD5 Checksum': file_meta.get('md5Checksum', ''),
+                    'Duplicate Group ID': duplicate_group_id,
+                    'Parent Folder': parent_id,
+                    'Parent Folder ID': parent_id,
+                    'Duplicate File Name': duplicate_meta['name'],
+                    'Duplicate File Path': f"{duplicate_meta.get('parents', [''])[0]}/{duplicate_meta['name']}",
+                    'Duplicate File Size': get_human_readable_size(int(duplicate_meta.get('size', 0))),
+                    'Duplicate File ID': duplicate_meta['id']
+                }
+
+            # Write both files to CSV
+            writer.writerow(prepare_file_row(file1_meta, file2_meta))
+            writer.writerow(prepare_file_row(file2_meta, file1_meta))
+            duplicate_group_id += 1
+
+    logging.info(f"CSV export completed: {csv_filename}")
+    return csv_filename
+
+def fetch_all_files(service: Resource, use_cache: bool = True, force_refresh: bool = False) -> List[Dict]:
+    """Fetch all files from Drive with caching."""
+    cache = MetadataCache()
+
+    if use_cache and not force_refresh:
+        cached = cache.get('all_files')
+        if cached:
+            return cached
+
+    files = []
+    page_token = None
+
+    try:
+        while True:
+            response = service.files().list(
+                q="trashed = false",
+                pageSize=1000,
+                fields="nextPageToken, files(id, name, size, md5Checksum, trashed, parents)",
+                pageToken=page_token
+            ).execute()
+            
+            batch = response.get('files', [])
+            files.extend(batch)
+            logging.info(f"Retrieved {len(files)} files")
+            
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+
+    except Exception as e:
+        logging.error(f"Failed to fetch files: {e}")
+        if use_cache:
+            cached = cache.get('all_files')
+            if cached:
+                logging.info("Using cached data as fallback")
+                return cached
+        raise
+
+    if use_cache:
+        cache.set('all_files', files)
+
+    return files
+
+def find_duplicates(service, delete=False, use_cache=True, force_refresh=False):
+    """Find duplicate files in Google Drive with batched operations."""
+    drive_api = DriveAPI(service)
+    
+    # Get all files
+    all_files = drive_api.list_files(force_refresh=force_refresh)
     total_files = len(all_files)
-    file_dict = {}
-    for i, file in enumerate(all_files, 1):
-        if 'md5Checksum' in file:
-            duplicate = file_dict.get(file['md5Checksum'])
-            if duplicate:
-                handle_duplicate(service, file, duplicate, delete)
-            else:
-                file_dict[file['md5Checksum']] = file
+    logging.info(f"Found {total_files} total files")
 
-        if i % 100 == 0 or i == total_files:
-            logging.info(f"Checked {i} out of {total_files} files.")
+    # Pre-filter files that have MD5 checksums and size > 0
+    valid_files = [
+        f for f in all_files 
+        if 'md5Checksum' in f and f.get('size', '0') != '0'
+    ]
+    logging.info(f"Found {len(valid_files)} files with valid checksums")
 
+    # Create a dictionary of size -> files first to reduce MD5 comparison space
+    files_by_size = defaultdict(list)
+    for file in valid_files:
+        files_by_size[file['size']].append(file)
+
+    # Find duplicate groups
+    duplicate_groups = []
+    duplicate_folders = defaultdict(set)
+    
+    # Process files of the same size
+    for size, size_files in files_by_size.items():
+        if len(size_files) > 1:
+            # Group by MD5
+            files_by_md5 = defaultdict(list)
+            for file in size_files:
+                files_by_md5[file['md5Checksum']].append(file)
+            
+            # Process each group of duplicates
+            for md5, files in files_by_md5.items():
+                if len(files) > 1:
+                    duplicate_groups.append(files)
+                    
+                    # Get metadata for all files in this group at once
+                    file_ids = [f['id'] for f in files]
+                    metadata = get_files_metadata_batch(drive_api, file_ids)
+                    
+                    # Print group info once
+                    example_file = files[0]
+                    file_size = get_human_readable_size(int(example_file.get('size', 0)))
+                    print(f"\nFound duplicate group ({len(files)} files):")
+                    
+                    # Process each file in the group
+                    for file in files:
+                        file_meta = metadata.get(file['id'])
+                        if not file_meta:
+                            continue
+                            
+                        # Update folder tracking
+                        for parent in file_meta.get('parents', []):
+                            duplicate_folders[parent].add(file_meta['id'])
+                            
+                        # Print file info
+                        print(f"  - {file_meta['name']} (Size: {file_size})")
+                        print(f"    ID: {file_meta['id']}")
+                        print(f"    Parent: {', '.join(file_meta.get('parents', ['No parent']))}")
+                    
+                    # Handle deletion if requested
+                    if delete:
+                        _handle_group_deletion(drive_api, files, metadata)
+
+    # Print summary
+    total_duplicates = sum(len(group) for group in duplicate_groups)
+    total_size = sum(
+        int(group[0].get('size', 0)) * (len(group) - 1)  # Count only redundant copies
+        for group in duplicate_groups
+    )
+    
+    print("\nDuplicate Files Summary:")
+    print(f"Total files scanned: {total_files}")
+    print(f"Duplicate groups found: {len(duplicate_groups)}")
+    print(f"Total duplicate files: {total_duplicates}")
+    print(f"Wasted space: {get_human_readable_size(total_size)}")
+    print(f"Folders containing duplicates: {len(duplicate_folders)}")
+
+    # Print folder summary if there are duplicates
+    if duplicate_folders:
+        _print_duplicate_folders_summary(drive_api, duplicate_folders)
+
+    return duplicate_groups
+
+def _handle_group_deletion(drive_api: DriveAPI, files: List[dict], metadata: Dict[str, dict]):
+    """Handle deletion for a group of duplicate files."""
+    print("\nDuplicate files found:")
+    for i, file in enumerate(files, 1):
+        file_meta = metadata.get(file['id'])
+        if file_meta:
+            print(f"{i}: {file_meta['name']}")
+            print(f"   Location: {', '.join(file_meta.get('parents', ['No parent']))}")
+    
+    while True:
+        choice = input("\nWhich file number would you like to keep? (1-{} or s to skip): ".format(len(files)))
+        if choice.lower() == 's':
+            break
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(files):
+                # Move all other files to trash
+                files_to_trash = [f['id'] for i, f in enumerate(files) if i != idx]
+                results = move_files_to_trash_batch(drive_api, files_to_trash)
+                
+                # Report results
+                success = sum(1 for v in results.values() if v)
+                print(f"\nMoved {success} of {len(files_to_trash)} files to trash")
+                break
+        except ValueError:
+            pass
+        print("Invalid choice. Please enter a valid number or 's' to skip.")
+
+def _print_duplicate_folders_summary(drive_api: DriveAPI, duplicate_folders: Dict[str, Set[str]]):
+    """Print summary of folders containing duplicates."""
+    print("\nFolders containing duplicates:")
+    print("==============================")
+    
+    # Get all folder metadata in one batch
+    folder_ids = list(duplicate_folders.keys())
+    folder_metadata = get_files_metadata_batch(drive_api, folder_ids)
+    
+    # Sort folders by number of duplicates
+    folder_info = []
+    for folder_id, files in duplicate_folders.items():
+        folder_meta = folder_metadata.get(folder_id)
+        if folder_meta:
+            folder_info.append({
+                'name': folder_meta.get('name', 'Unknown'),
+                'count': len(files),
+                'id': folder_id
+            })
+    
+    # Sort by duplicate count
+    folder_info.sort(key=lambda x: x['count'], reverse=True)
+    
+    # Print sorted summary
+    for info in folder_info:
+        print(f"\n{info['name']}:")
+        print(f"  - {info['count']} duplicate files")
+        print(f"  - Folder ID: {info['id']}")
 
 def main():
     parser = argparse.ArgumentParser(description="Find duplicate files in Google Drive")
     parser.add_argument('--delete', action='store_true', help='Move duplicate files to trash')
+    parser.add_argument('--no-cache', action='store_true', help='Disable use of cache')
+    parser.add_argument('--refresh-cache', action='store_true', help='Force refresh of cache')
     args = parser.parse_args()
+    
     service = get_service()
-    find_duplicates(service, delete=args.delete)
-
+    find_duplicates(service, delete=args.delete, use_cache=not args.no_cache, force_refresh=args.refresh_cache)
 
 if __name__ == '__main__':
     main()
