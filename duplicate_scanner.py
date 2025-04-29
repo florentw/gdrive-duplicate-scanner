@@ -68,7 +68,8 @@ def get_cache_key():
 class MetadataCache:
     """Centralized cache manager for file metadata."""
     
-    def __init__(self):
+    def __init__(self, cache_file: str = CACHE_FILE):
+        self._cache_file = cache_file
         self._cache = {}
         self._last_save = datetime.now()
         self._modified = False
@@ -76,13 +77,13 @@ class MetadataCache:
 
     def _load(self) -> None:
         """Load cache from disk if valid."""
-        if not os.path.exists(CACHE_FILE):
+        if not os.path.exists(self._cache_file):
             logging.info("No cache file found, starting fresh")
             self._cache = {}
             return
 
         try:
-            with open(CACHE_FILE, 'r') as f:
+            with open(self._cache_file, 'r') as f:
                 data = json.load(f)
 
             # Skip if cache is expired or invalid
@@ -129,7 +130,7 @@ class MetadataCache:
                 'cache_key': get_cache_key(),
                 'files': self._cache
             }
-            with open(CACHE_FILE, 'w') as f:
+            with open(self._cache_file, 'w') as f:
                 json.dump(data, f)
             
             self._last_save = datetime.now()
@@ -177,9 +178,6 @@ class MetadataCache:
         """Context manager exit - ensure cache is saved."""
         if self._modified:
             self._save(force=True)
-
-# At the top level, keep the global instance
-metadata_cache = MetadataCache()
 
 def get_human_readable_size(size_bytes):
     """Convert size in bytes to human readable format."""
@@ -316,10 +314,10 @@ class BatchHandler:
 class DriveAPI:
     """Simplified Google Drive API wrapper with caching."""
     
-    def __init__(self, service: Resource):
+    def __init__(self, service: Resource, cache: Optional[MetadataCache] = None):
         self.service = service
-        self.cache = metadata_cache  # Use the global instance instead of creating a new one
-    
+        self.cache = cache or MetadataCache()  # Use provided cache or create new one
+
     def list_files(self, force_refresh: bool = False) -> List[Dict]:
         """List all files in Drive with caching."""
         if not force_refresh:
@@ -364,22 +362,22 @@ class DriveAPI:
         """Create a new batch operation."""
         return BatchHandler(self.service, self.cache)
 
-def get_file_metadata(service, file_id: str) -> Optional[dict]:
+def get_file_metadata(drive_api: DriveAPI, file_id: str) -> Optional[dict]:
     """Get file metadata with caching."""
     if not file_id:
         return None
 
     # Check cache first
-    cached_metadata = metadata_cache.get(file_id)
+    cached_metadata = drive_api.cache.get(file_id)
     if cached_metadata is not None:
         return cached_metadata
 
     try:
-        metadata = service.files().get(
+        metadata = drive_api.service.files().get(
             fileId=file_id,
             fields=METADATA_FIELDS
         ).execute()
-        metadata_cache.set(file_id, metadata)
+        drive_api.cache.set(file_id, metadata)
         return metadata
     except Exception as e:
         logging.error(f"Error getting file metadata for {file_id}: {e}")
@@ -501,7 +499,7 @@ def generate_csv_filename():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     return f'drive_duplicates_{timestamp}.csv'
 
-def write_to_csv(duplicate_pairs, service):
+def write_to_csv(duplicate_pairs, drive_api: DriveAPI):
     """Write duplicate file information to CSV with minimal API calls."""
     csv_filename = generate_csv_filename()
     duplicate_group_id = 1
@@ -512,8 +510,8 @@ def write_to_csv(duplicate_pairs, service):
         
         for file1, file2 in duplicate_pairs:
             # Get complete metadata for both files
-            file1_meta = get_file_metadata(service, file1['id'])
-            file2_meta = get_file_metadata(service, file2['id'])
+            file1_meta = get_file_metadata(drive_api, file1['id'])
+            file2_meta = get_file_metadata(drive_api, file2['id'])
             
             if not file1_meta or not file2_meta:
                 continue
@@ -544,69 +542,55 @@ def write_to_csv(duplicate_pairs, service):
     logging.info(f"CSV export completed: {csv_filename}")
     return csv_filename
 
-def fetch_all_files(service: Resource, use_cache: bool = True, force_refresh: bool = False) -> List[Dict]:
-    """Fetch all files from Drive with caching."""
-    cache = MetadataCache()
+def _filter_valid_files(files: List[Dict]) -> List[Dict]:
+    """Filter files that have valid MD5 checksums and non-zero size."""
+    return [
+        f for f in files 
+        if 'md5Checksum' in f and f.get('size', '0') != '0'
+    ]
 
-    if use_cache and not force_refresh:
-        cached = cache.get('all_files')
-        if cached:
-            return cached
+def _group_files_by_size(files: List[Dict]) -> Dict[str, List[Dict]]:
+    """Group files by their size."""
+    files_by_size = defaultdict(list)
+    for file in files:
+        files_by_size[file['size']].append(file)
+    return files_by_size
 
-    files = []
-    page_token = None
+def _group_files_by_md5(files: List[Dict]) -> Dict[str, List[Dict]]:
+    """Group files by their MD5 checksum."""
+    files_by_md5 = defaultdict(list)
+    for file in files:
+        files_by_md5[file['md5Checksum']].append(file)
+    return files_by_md5
 
-    try:
-        while True:
-            response = service.files().list(
-                q="trashed = false",
-                pageSize=1000,
-                fields="nextPageToken, files(id, name, size, md5Checksum, trashed, parents)",
-                pageToken=page_token
-            ).execute()
-            
-            batch = response.get('files', [])
-            files.extend(batch)
-            logging.info(f"Retrieved {len(files)} files")
-            
-            page_token = response.get('nextPageToken')
-            if not page_token:
-                break
-
-    except Exception as e:
-        logging.error(f"Failed to fetch files: {e}")
-        if use_cache:
-            cached = cache.get('all_files')
-            if cached:
-                logging.info("Using cached data as fallback")
-                return cached
-        raise
-
-    if use_cache:
-        cache.set('all_files', files)
-
-    return files
-
-def find_duplicates(service, delete=False, use_cache=True, force_refresh=False):
-    """Find duplicate files in Google Drive with batched operations."""
-    drive_api = DriveAPI(service)
+def _print_duplicate_group(files: List[Dict], metadata: Dict[str, dict]) -> None:
+    """Print information about a group of duplicate files."""
+    example_file = files[0]
+    file_size = get_human_readable_size(int(example_file.get('size', 0)))
+    print(f"\nFound duplicate group ({len(files)} files):")
     
+    for file in files:
+        file_meta = metadata.get(file['id'])
+        if not file_meta:
+            continue
+            
+        print(f"  - {file_meta['name']} (Size: {file_size})")
+        print(f"    ID: {file_meta['id']}")
+        print(f"    Parent: {', '.join(file_meta.get('parents', ['No parent']))}")
+
+def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bool = False) -> List[List[Dict]]:
+    """Find duplicate files in Google Drive with batched operations."""
     # Get all files
     all_files = drive_api.list_files(force_refresh=force_refresh)
     total_files = len(all_files)
     logging.info(f"Found {total_files} total files")
 
     # Pre-filter files that have MD5 checksums and size > 0
-    valid_files = [
-        f for f in all_files 
-        if 'md5Checksum' in f and f.get('size', '0') != '0'
-    ]
+    valid_files = _filter_valid_files(all_files)
     logging.info(f"Found {len(valid_files)} files with valid checksums")
 
-    # Create a dictionary of size -> files first to reduce MD5 comparison space
-    files_by_size = defaultdict(list)
-    for file in valid_files:
-        files_by_size[file['size']].append(file)
+    # Group files by size first to reduce MD5 comparison space
+    files_by_size = _group_files_by_size(valid_files)
 
     # Find duplicate groups
     duplicate_groups = []
@@ -616,9 +600,7 @@ def find_duplicates(service, delete=False, use_cache=True, force_refresh=False):
     for size, size_files in files_by_size.items():
         if len(size_files) > 1:
             # Group by MD5
-            files_by_md5 = defaultdict(list)
-            for file in size_files:
-                files_by_md5[file['md5Checksum']].append(file)
+            files_by_md5 = _group_files_by_md5(size_files)
             
             # Process each group of duplicates
             for md5, files in files_by_md5.items():
@@ -629,25 +611,15 @@ def find_duplicates(service, delete=False, use_cache=True, force_refresh=False):
                     file_ids = [f['id'] for f in files]
                     metadata = get_files_metadata_batch(drive_api, file_ids)
                     
-                    # Print group info once
-                    example_file = files[0]
-                    file_size = get_human_readable_size(int(example_file.get('size', 0)))
-                    print(f"\nFound duplicate group ({len(files)} files):")
+                    # Print group info
+                    _print_duplicate_group(files, metadata)
                     
-                    # Process each file in the group
+                    # Update folder tracking
                     for file in files:
                         file_meta = metadata.get(file['id'])
-                        if not file_meta:
-                            continue
-                            
-                        # Update folder tracking
-                        for parent in file_meta.get('parents', []):
-                            duplicate_folders[parent].add(file_meta['id'])
-                            
-                        # Print file info
-                        print(f"  - {file_meta['name']} (Size: {file_size})")
-                        print(f"    ID: {file_meta['id']}")
-                        print(f"    Parent: {', '.join(file_meta.get('parents', ['No parent']))}")
+                        if file_meta:
+                            for parent in file_meta.get('parents', []):
+                                duplicate_folders[parent].add(file_meta['id'])
                     
                     # Handle deletion if requested
                     if delete:
@@ -733,12 +705,12 @@ def _print_duplicate_folders_summary(drive_api: DriveAPI, duplicate_folders: Dic
 def main():
     parser = argparse.ArgumentParser(description="Find duplicate files in Google Drive")
     parser.add_argument('--delete', action='store_true', help='Move duplicate files to trash')
-    parser.add_argument('--no-cache', action='store_true', help='Disable use of cache')
     parser.add_argument('--refresh-cache', action='store_true', help='Force refresh of cache')
     args = parser.parse_args()
     
     service = get_service()
-    find_duplicates(service, delete=args.delete, use_cache=not args.no_cache, force_refresh=args.refresh_cache)
+    drive_api = DriveAPI(service)
+    find_duplicates(drive_api, delete=args.delete, force_refresh=args.refresh_cache)
 
 if __name__ == '__main__':
     main()
