@@ -285,6 +285,7 @@ class BatchHandler:
         self.count = 0
         self._updates = {}
         self._removals = []
+        self._failed_requests = set()
 
     def add_metadata_request(self, file_id: str) -> None:
         """Add metadata fetch request to batch."""
@@ -292,9 +293,7 @@ class BatchHandler:
         cached = self.cache.get(file_id)
         if cached:
             self.results[file_id] = cached
-            self._updates[file_id] = cached
-            # Don't increment count for cached files
-            return
+            return  # Don't count cached files in batch size
 
         if self.count >= BATCH_SIZE:
             self.execute()
@@ -303,6 +302,7 @@ class BatchHandler:
             if exception:
                 logging.warning(f"Failed to fetch metadata for {file_id} in batch: {exception}")
                 self.results[file_id] = None
+                self._failed_requests.add(file_id)
             else:
                 self.results[file_id] = response
                 self._updates[file_id] = response
@@ -315,7 +315,6 @@ class BatchHandler:
 
     def add_trash_request(self, file_id: str) -> None:
         """Add trash move request to batch."""
-        # Execute current batch if we've reached the limit
         if self.count >= BATCH_SIZE:
             self.execute()
 
@@ -323,6 +322,7 @@ class BatchHandler:
             if exception:
                 logging.error(f"Failed to trash file {file_id}: {exception}")
                 self.results[file_id] = False
+                self._failed_requests.add(file_id)
             else:
                 self.results[file_id] = True
                 self._removals.append(file_id)
@@ -337,45 +337,33 @@ class BatchHandler:
         """Execute batch requests if any pending."""
         if not self.count:
             return
-
+            
         try:
             self.batch.execute()
-        
-            # Update cache
-            if self._updates:
-                self.cache.update(self._updates)
+            # Update cache with successful results
+            for file_id, metadata in self._updates.items():
+                if metadata:
+                    self.cache.set(file_id, metadata)
+            # Remove trashed files from cache
             if self._removals:
                 self.cache.remove(self._removals)
-
         except Exception as e:
             logging.error(f"Batch execution failed: {e}")
-            # Retry failed requests individually with exponential backoff
-            for file_id in list(self._updates.keys()):
-                if self.results.get(file_id) is None:
-                    retries = 0
-                    while retries < MAX_RETRIES:
-                        try:
-                            response = self.service.files().get(
-                                fileId=file_id,
-                                fields='*'
-                            ).execute()
-                            self.results[file_id] = response
-                            self._updates[file_id] = response
-                            break
-                        except Exception as retry_e:
-                            retries += 1
-                            if retries == MAX_RETRIES:
-                                logging.error(f"Retry failed for {file_id}: {retry_e}")
-                            else:
-                                delay = RETRY_DELAY * (2 ** (retries - 1))
-                                logging.warning(f"Retry {retries} for {file_id}, waiting {delay}s")
-                                time.sleep(delay)
+            # Mark all pending requests as failed
+            for file_id in self._updates:
+                if file_id not in self.results:
+                    self.results[file_id] = None
+                    self._failed_requests.add(file_id)
         finally:
-            # Reset state
+            # Reset for next batch
             self.batch = self.service.new_batch_http_request()
             self.count = 0
-            self._updates.clear()
-            self._removals.clear()
+            self._updates = {}
+            self._removals = []
+
+    def get_failed_requests(self) -> Set[str]:
+        """Get set of file IDs that failed to process."""
+        return self._failed_requests
 
 class DriveAPI:
     """Simplified Google Drive API wrapper with caching and batching."""
@@ -386,8 +374,9 @@ class DriveAPI:
 
     def list_files(self, force_refresh: bool = False) -> List[Dict]:
         """List all files in Drive with caching."""
+        cache_key = 'all_files'
         if not force_refresh:
-            cached = self.cache.get('all_files')
+            cached = self.cache.get(cache_key)
             if cached:
                 logging.info(f"Using cached list of {len(cached)} files")
                 return cached
@@ -412,13 +401,13 @@ class DriveAPI:
                 if not page_token:
                     break
             
-            self.cache.set('all_files', files)
+            self.cache.set(cache_key, files)
             logging.info(f"Cached {len(files)} files")
             return files
             
         except Exception as e:
             logging.error(f"Failed to fetch files: {e}")
-            cached = self.cache.get('all_files')
+            cached = self.cache.get(cache_key)
             if cached:
                 logging.info(f"Using cached data as fallback ({len(cached)} files)")
                 return cached
@@ -448,53 +437,64 @@ class DriveAPI:
     def get_files_metadata_batch(self, file_ids: list[str]) -> Dict[str, dict]:
         """Get metadata for multiple files in batches with retry logic."""
         results = {}
-        failed_ids = set()
+        files_to_fetch = []
         
-        # Process files in smaller batches
-        for i in range(0, len(file_ids), BATCH_SIZE):
-            batch_ids = file_ids[i:i + BATCH_SIZE]
-            logging.info(f"Processing batch {i//BATCH_SIZE + 1} of {(len(file_ids) + BATCH_SIZE - 1)//BATCH_SIZE}")
+        # Check cache first
+        for file_id in file_ids:
+            cached_metadata = self.cache.get(file_id)
+            if cached_metadata is not None:
+                results[file_id] = cached_metadata
+            else:
+                files_to_fetch.append(file_id)
+        
+        if not files_to_fetch:
+            return results
+        
+        # Process remaining files in smaller batches
+        for i in range(0, len(files_to_fetch), BATCH_SIZE):
+            batch_ids = files_to_fetch[i:i + BATCH_SIZE]
+            logging.info(f"Processing batch {i//BATCH_SIZE + 1} of {(len(files_to_fetch) + BATCH_SIZE - 1)//BATCH_SIZE}")
+            
+            # Try batch request first
+            handler = BatchHandler(self.service, self.cache)
+            for file_id in batch_ids:
+                handler.add_metadata_request(file_id)
             
             try:
-                handler = BatchHandler(self.service, self.cache)
-                for file_id in batch_ids:
-                    handler.add_metadata_request(file_id)
-                
                 # Execute the batch
                 handler.execute()
-                
-                # Check for failed requests
-                for file_id in batch_ids:
-                    if file_id not in handler.results or handler.results[file_id] is None:
-                        failed_ids.add(file_id)
-                    else:
-                        results[file_id] = handler.results[file_id]
+                results.update(handler.results)
             except Exception as e:
-                logging.error(f"Batch processing failed: {e}")
-                failed_ids.update(batch_ids)
-        
-        # Retry failed requests individually with exponential backoff
-        if failed_ids:
-            logging.info(f"Retrying {len(failed_ids)} failed requests")
-            for file_id in failed_ids:
-                retries = 0
-                while retries < MAX_RETRIES:
-                    try:
-                        metadata = self.service.files().get(
-                            fileId=file_id,
-                            fields='*'
-                        ).execute()
-                        results[file_id] = metadata
-                        break
-                    except Exception as e:
-                        retries += 1
-                        if retries == MAX_RETRIES:
-                            logging.error(f"Failed to fetch metadata for {file_id} after {MAX_RETRIES} retries: {e}")
-                        else:
-                            # Exponential backoff
-                            delay = RETRY_DELAY * (2 ** (retries - 1))
-                            logging.warning(f"Retry {retries} for {file_id}, waiting {delay}s")
-                            time.sleep(delay)
+                logging.error(f"Batch execution failed: {e}")
+                # Mark all pending requests as failed
+                for file_id in batch_ids:
+                    if file_id not in results:
+                        results[file_id] = None
+            
+            # Retry failed requests individually
+            failed_requests = handler.get_failed_requests()
+            for file_id in failed_requests:
+                if file_id not in results or results[file_id] is None:
+                    retries = 0
+                    while retries < MAX_RETRIES:
+                        try:
+                            metadata = self.service.files().get(
+                                fileId=file_id,
+                                fields=METADATA_FIELDS
+                            ).execute()
+                            if metadata:  # Only update if we got valid metadata
+                                results[file_id] = metadata
+                                self.cache.set(file_id, metadata)
+                                break
+                        except Exception as retry_e:
+                            retries += 1
+                            if retries == MAX_RETRIES:
+                                logging.error(f"Failed to fetch metadata for {file_id} after {MAX_RETRIES} retries: {retry_e}")
+                                results[file_id] = None
+                            else:
+                                delay = RETRY_DELAY * (2 ** (retries - 1))
+                                logging.warning(f"Retry {retries} for {file_id}, waiting {delay}s")
+                                time.sleep(delay)
         
         return results
 
@@ -505,20 +505,38 @@ class DriveAPI:
         # Process files in smaller batches
         for i in range(0, len(file_ids), BATCH_SIZE):
             batch_ids = file_ids[i:i + BATCH_SIZE]
-            try:
-                handler = BatchHandler(self.service, self.cache)
-                
-                for file_id in batch_ids:
-                    handler.add_trash_request(file_id)
-                
-                # Execute the batch
-                handler.execute()
-                results.update(handler.results)
-            except Exception as e:
-                logging.error(f"Batch trash operation failed: {e}")
-                # Mark all files in this batch as failed
-                for file_id in batch_ids:
-                    results[file_id] = False
+            handler = BatchHandler(self.service, self.cache)
+            
+            for file_id in batch_ids:
+                handler.add_trash_request(file_id)
+            
+            # Execute the batch
+            handler.execute()
+            results.update(handler.results)
+            
+            # Retry failed requests individually
+            failed_requests = handler.get_failed_requests()
+            for file_id in failed_requests:
+                if file_id not in results:
+                    retries = 0
+                    while retries < MAX_RETRIES:
+                        try:
+                            self.service.files().update(
+                                fileId=file_id,
+                                body={'trashed': True}
+                            ).execute()
+                            results[file_id] = True
+                            self.cache.remove([file_id])
+                            break
+                        except Exception as retry_e:
+                            retries += 1
+                            if retries == MAX_RETRIES:
+                                logging.error(f"Failed to trash file {file_id} after {MAX_RETRIES} retries: {retry_e}")
+                                results[file_id] = False
+                            else:
+                                delay = RETRY_DELAY * (2 ** (retries - 1))
+                                logging.warning(f"Retry {retries} for {file_id}, waiting {delay}s")
+                                time.sleep(delay)
         
         return results
 
@@ -806,16 +824,15 @@ def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bo
 
     # Write duplicates to CSV if any were found
     if duplicate_groups:
-        # Create pairs of files for CSV export
         duplicate_pairs = []
         for group in duplicate_groups:
-            # For each group, create pairs of files
+            # Create pairs of files from each group
             for i in range(len(group)):
                 for j in range(i + 1, len(group)):
                     duplicate_pairs.append((group[i], group[j]))
         
         csv_file = write_to_csv(duplicate_pairs, drive_api)
-        print(f"\nDuplicate information written to: {csv_file}")
+        print(f"\nDuplicate pairs have been written to: {csv_file}")
 
     return duplicate_groups
 

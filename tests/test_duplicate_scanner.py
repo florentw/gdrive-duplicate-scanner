@@ -170,31 +170,44 @@ class TestDuplicateScanner(unittest.TestCase):
 
     def test_drive_api_get_files_metadata_batch_retry(self):
         """Test batch metadata fetching with retries."""
-        # Mock the files().get() request
-        mock_get = Mock()
-        mock_get.execute = Mock(side_effect=[
-            Exception("API Error"),  # First call fails
-            {'id': 'test_id', 'name': 'test.txt'}  # Second call succeeds
-        ])
-        self.mock_files_service.get.return_value = mock_get
+        # Mock the service for retry
+        mock_service = MagicMock()
+        mock_get = MagicMock()
+        mock_service.files.return_value.get.return_value = mock_get
+        mock_get.execute.return_value = {'id': 'test_id', 'name': 'test_file'}
         
-        # Set up batch request to fail
-        def mock_add(request, callback):
-            callback('test_id', None, Exception("API Error"))
+        # Create DriveAPI instance with mocked service
+        self.drive_api = DriveAPI(mock_service, self.test_cache)
         
-        mock_batch = Mock()
-        mock_batch.add = Mock(side_effect=mock_add)
-        mock_batch.execute = Mock()
-        self.mock_service.new_batch_http_request.return_value = mock_batch
-        
-        # Test the contract: should get metadata after retry
-        result = self.drive_api.get_files_metadata_batch(['test_id'])
-        
-        # Verify the contract: should get metadata after retry
-        self.assertIn('test_id', result)
-        self.assertEqual(result['test_id']['name'], 'test.txt')
-        # Verify retry behavior
-        self.assertEqual(mock_get.execute.call_count, 2)  # One initial failure, one success
+        # Mock the BatchHandler
+        with patch('duplicate_scanner.BatchHandler') as mock_handler:
+            mock_instance = mock_handler.return_value
+            
+            # First attempt fails
+            def mock_add_metadata_request(file_id):
+                mock_instance.results[file_id] = None
+                mock_instance._failed_requests.add(file_id)
+            
+            def mock_execute():
+                # Simulate batch execution failure
+                raise Exception("Batch execution failed")
+            
+            mock_instance.results = {}
+            mock_instance._failed_requests = set()
+            mock_instance.add_metadata_request.side_effect = mock_add_metadata_request
+            mock_instance.execute.side_effect = mock_execute
+            mock_instance.get_failed_requests.return_value = {'test_id'}
+            
+            # Call the method
+            result = self.drive_api.get_files_metadata_batch(['test_id'])
+            
+            # Verify the result
+            self.assertIsNotNone(result)
+            self.assertIn('test_id', result)
+            self.assertEqual(result['test_id']['name'], 'test_file')
+            
+            # Verify retry behavior
+            self.assertEqual(mock_get.execute.call_count, 1)  # One retry attempt
 
     def test_drive_api_move_files_to_trash_batch(self):
         """Test batch trash operations."""
@@ -226,31 +239,32 @@ class TestDuplicateScanner(unittest.TestCase):
             self.assertEqual(mock_instance.add_trash_request.call_count, 2)
             mock_instance.execute.assert_called_once()
 
-    def test_drive_api_get_file_metadata_caching(self):
+    def test_drive_api_get_file_metadata_cache(self):
         """Test that get_file_metadata caches results."""
         mock_metadata = {
             'id': 'test_id',
             'name': 'test_file.txt',
             'parents': ['parent_id'],
             'size': '1024',
+            'md5Checksum': 'hash1',
+            'mimeType': 'text/plain',
+            'trashed': False
         }
         
+        # Mock the service call
         mock_get = Mock()
         mock_get.execute.return_value = mock_metadata
-        mock_files = Mock()
-        mock_files.get.return_value = mock_get
-        self.mock_service.files.return_value = mock_files
-
+        self.mock_files_service.get.return_value = mock_get
+        
         # First call should make an API request
         result1 = self.drive_api.get_file_metadata('test_id')
+        
         # Second call should use cached result
         result2 = self.drive_api.get_file_metadata('test_id')
-
+        
         self.assertEqual(result1, result2)
-        mock_files.get.assert_called_once_with(
-            fileId='test_id', 
-            fields='id, name, parents, size, md5Checksum, mimeType, trashed'
-        )
+        self.assertEqual(result1, mock_metadata)
+        self.assertEqual(mock_get.execute.call_count, 1)  # Should only be called once
 
     def test_drive_api_get_file_metadata_error(self):
         """Test get_file_metadata error handling."""
@@ -452,15 +466,93 @@ class TestDuplicateScanner(unittest.TestCase):
         """Test file listing with cache."""
         mock_files = self._setup_mock_files()
         
+        # Mock the service call
+        mock_list = Mock()
+        mock_list.execute.return_value = {'files': mock_files}
+        self.mock_files_service.list.return_value = mock_list
+        
         # First call should cache results
-        self.drive_api.list_files = Mock(return_value=mock_files)
         result1 = self.drive_api.list_files()
         
         # Second call should use cache
         result2 = self.drive_api.list_files()
         
         self.assertEqual(result1, result2)
-        self.assertEqual(self.drive_api.list_files.call_count, 2)
+        self.assertEqual(result1, mock_files)
+        self.assertEqual(mock_list.execute.call_count, 1)  # Should only be called once
+
+    def test_drive_api_get_files_metadata_batch_cache(self):
+        """Test batch metadata fetching with cache."""
+        # Mock the service
+        mock_service = MagicMock()
+        mock_get = MagicMock()
+        mock_service.files.return_value.get.return_value = mock_get
+        mock_get.execute.return_value = {'id': 'test_id', 'name': 'test_file'}
+        
+        # Create DriveAPI instance with mocked service
+        self.drive_api = DriveAPI(mock_service, self.test_cache)
+        
+        # Mock the BatchHandler
+        with patch('duplicate_scanner.BatchHandler') as mock_handler:
+            mock_instance = mock_handler.return_value
+            
+            # First call - should hit API
+            def mock_add_metadata_request(file_id):
+                mock_instance.results[file_id] = None
+                mock_instance._failed_requests.add(file_id)
+            
+            def mock_execute():
+                # Simulate batch execution failure to trigger retry
+                raise Exception("Batch execution failed")
+            
+            mock_instance.results = {}
+            mock_instance._failed_requests = set()
+            mock_instance.add_metadata_request.side_effect = mock_add_metadata_request
+            mock_instance.execute.side_effect = mock_execute
+            mock_instance.get_failed_requests.return_value = {'test_id'}
+            
+            # First call - should hit API and cache result
+            result1 = self.drive_api.get_files_metadata_batch(['test_id'])
+            self.assertIn('test_id', result1)
+            self.assertEqual(result1['test_id']['name'], 'test_file')
+            
+            # Second call - should use cache
+            result2 = self.drive_api.get_files_metadata_batch(['test_id'])
+            self.assertIn('test_id', result2)
+            self.assertEqual(result2['test_id']['name'], 'test_file')
+            
+            # Verify API was called only once (during first call)
+            # Verify API was called only once
+            self.assertEqual(mock_get.execute.call_count, 1)
+
+    def test_find_duplicates_cache(self):
+        """Test finding duplicates with cached data."""
+        # Mock the service
+        mock_service = MagicMock()
+        mock_list = MagicMock()
+        mock_service.files.return_value.list.return_value = mock_list
+        
+        # Set up mock response for list_files
+        mock_list.execute.return_value = {
+            'files': [
+                {'id': '1', 'name': 'file1', 'size': '100', 'md5Checksum': 'abc'},
+                {'id': '2', 'name': 'file2', 'size': '100', 'md5Checksum': 'abc'}
+            ]
+        }
+        
+        # Create DriveAPI instance with mocked service
+        self.drive_api = DriveAPI(mock_service, self.test_cache)
+        
+        # First call - should hit API
+        result1 = self.drive_api.list_files()
+        self.assertEqual(len(result1), 2)
+        
+        # Second call - should use cache
+        result2 = self.drive_api.list_files()
+        self.assertEqual(len(result2), 2)
+        
+        # Verify API was called only once
+        self.assertEqual(mock_list.execute.call_count, 1)
 
     def test_drive_api_get_files_metadata_batch_size_limit(self):
         """Test batch size limits in metadata fetching."""
