@@ -7,7 +7,8 @@ logging.basicConfig(filename='drive_scanner.log', level=logging.INFO, format=LOG
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-logging.getLogger().addHandler(console_handler)
+logger = logging.getLogger()
+logger.addHandler(console_handler)
 
 # Google Drive API scopes
 SCOPES = ['https://www.googleapis.com/auth/drive']

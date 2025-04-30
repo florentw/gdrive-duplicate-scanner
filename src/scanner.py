@@ -1,101 +1,149 @@
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 from collections import defaultdict
 from drive_api import DriveAPI
 from models import DuplicateGroup, DuplicateFolder
 from utils import get_human_readable_size
+from cache import MetadataCache
+from config import logger
 
-class DuplicateScanner:
-    """Scans Google Drive for duplicate files."""
+class BaseDuplicateScanner:
+    """Base class for scanning Google Drive for duplicate files."""
     
-    def __init__(self, drive_api: DriveAPI):
+    def __init__(self, drive_api: DriveAPI, cache: MetadataCache):
         self.drive_api = drive_api
-        self.duplicate_groups = []
-        self.duplicate_folders = {}
-        self.folder_files = defaultdict(set)
-
-    def scan(self, delete: bool = False, force_refresh: bool = False) -> List[DuplicateGroup]:
-        """Scan for duplicates and optionally delete them."""
-        files = self.drive_api.list_files(force_refresh)
-        valid_files = self._filter_valid_files(files)
-        
-        self._find_duplicates(valid_files)
-        self._process_folders()
-            
-        return self.duplicate_groups
+        self.cache = cache
+        self.duplicate_groups: List[DuplicateGroup] = []
+        self.duplicate_files_in_folders: Dict[str, DuplicateFolder] = {}
 
     def _filter_valid_files(self, files: List[Dict]) -> List[Dict]:
-        """Filter out invalid files."""
-        return [f for f in files if f.get('size') and f.get('md5Checksum')]
-
-    def _find_duplicates(self, valid_files: List[Dict]) -> None:
-        """Find duplicate files by size and MD5 hash."""
-        # Group files by size first
-        size_groups = self._group_files_by_size(valid_files)
-        
-        # Process each size group
-        for size_files in size_groups.values():
-            if len(size_files) > 1:  # Only process groups with multiple files
-                self._process_size_group(size_files)
+        """Filter out files that are not valid for duplicate detection."""
+        return [
+            file for file in files
+            if file.get('size', '0') != '0'  # Skip empty files
+            and not file.get('mimeType', '').startswith('application/vnd.google-apps.')  # Skip Google Workspace files
+        ]
 
     def _group_files_by_size(self, files: List[Dict]) -> Dict[str, List[Dict]]:
         """Group files by their size."""
-        size_groups = defaultdict(list)
+        size_groups: Dict[str, List[Dict]] = {}
         for file in files:
-            size_groups[file['size']].append(file)
+            size = file.get('size', '0')
+            if size not in size_groups:
+                size_groups[size] = []
+            size_groups[size].append(file)
         return size_groups
-
-    def _process_size_group(self, size_files: List[Dict]) -> None:
-        """Process a group of files with the same size."""
-        # Group by MD5 hash
-        md5_groups = self._group_files_by_md5(size_files)
-        
-        # Process each MD5 group
-        for files in md5_groups.values():
-            if len(files) > 1:  # Only process groups with multiple files
-                self._process_duplicate_group(files)
 
     def _group_files_by_md5(self, files: List[Dict]) -> Dict[str, List[Dict]]:
         """Group files by their MD5 hash."""
-        md5_groups = defaultdict(list)
+        md5_groups: Dict[str, List[Dict]] = {}
         for file in files:
-            md5_groups[file['md5Checksum']].append(file)
+            md5 = file.get('md5Checksum', '')
+            if md5:
+                if md5 not in md5_groups:
+                    md5_groups[md5] = []
+                md5_groups[md5].append(file)
         return md5_groups
 
-    def _process_duplicate_group(self, files: List[Dict]) -> None:
+    def _process_duplicate_group(self, files: List[Dict], metadata: Dict[str, dict]) -> None:
         """Process a group of duplicate files."""
-        # Get metadata for all files
-        file_ids = [f['id'] for f in files]
-        metadata = self.drive_api.get_files_metadata_batch(file_ids)
-        
-        # Create duplicate group
-        group = DuplicateGroup(files, metadata)
-        self.duplicate_groups.append(group)
-        
-        # Update folder tracking
-        self._update_folder_tracking(group)
+        if len(files) > 1:
+            group = DuplicateGroup(files, metadata)
+            self.duplicate_groups.append(group)
+            group.print_info()
 
-    def _update_folder_tracking(self, group: DuplicateGroup) -> None:
-        """Update folder tracking with duplicate files."""
-        for file in group.files:
-            if 'parents' in file:
-                for parent_id in file['parents']:
-                    # Add to folder's duplicate files
-                    if parent_id not in self.duplicate_folders:
-                        self.duplicate_folders[parent_id] = set()
-                    self.duplicate_folders[parent_id].add(file['id'])
-                    
-                    # Add to folder's total files
-                    self.folder_files[parent_id].add(file['id'])
+    def scan(self) -> None:
+        """Scan for duplicate files."""
+        raise NotImplementedError("Subclasses must implement scan()")
 
-    def _process_folders(self) -> None:
-        """Process folders containing duplicates."""
-        # Get metadata for all folders
-        folder_ids = list(self.duplicate_folders.keys())
-        folder_metadata = self.drive_api.get_files_metadata_batch(folder_ids)
+class DuplicateScanner(BaseDuplicateScanner):
+    """Scanner for finding duplicate files in Google Drive."""
+    
+    def scan(self) -> None:
+        """Scan for duplicate files."""
+        logger.info("Starting duplicate file scan...")
         
-        # Create DuplicateFolder objects
-        for folder_id, duplicate_files in self.duplicate_folders.items():
-            folder_meta = folder_metadata.get(folder_id, {})
-            folder = DuplicateFolder(folder_id, folder_meta, duplicate_files)
-            folder.update_metadata(folder_metadata)
-            self.duplicate_folders[folder_id] = folder 
+        # Get all files from cache or API
+        files = self.cache.get_all_files()
+        if not files:
+            files = self.drive_api.list_files()
+            self.cache.cache_files(files)
+        
+        # Filter valid files
+        valid_files = self._filter_valid_files(files)
+        logger.info(f"Found {len(valid_files)} valid files to check for duplicates")
+        
+        # Group by size first
+        size_groups = self._group_files_by_size(valid_files)
+        logger.info(f"Found {len(size_groups)} unique file sizes")
+        
+        # For each size group, check MD5 hashes
+        for size, files in size_groups.items():
+            if len(files) > 1:  # Only check if there are multiple files of the same size
+                md5_groups = self._group_files_by_md5(files)
+                for md5, duplicate_files in md5_groups.items():
+                    if len(duplicate_files) > 1:  # Only process if there are actual duplicates
+                        self._process_duplicate_group(duplicate_files, {})
+        
+        logger.info(f"Found {len(self.duplicate_groups)} groups of duplicate files")
+
+class DuplicateScannerWithFolders(BaseDuplicateScanner):
+    """Scanner for finding duplicate files and analyzing folder structures."""
+    
+    def scan(self) -> None:
+        """Scan for duplicate files and analyze folder structures."""
+        logger.info("Starting duplicate file scan with folder analysis...")
+        
+        # Get all files and folders from cache or API
+        files = self.cache.get_all_files()
+        folders = self.cache.get_all_folders()
+        
+        if not files or not folders:
+            files, folders = self.drive_api.list_all_files_and_folders()
+            self.cache.cache_files(files)
+            self.cache.cache_folders(folders)
+        
+        # Filter valid files
+        valid_files = self._filter_valid_files(files)
+        logger.info(f"Found {len(valid_files)} valid files to check for duplicates")
+        
+        # Group by size first
+        size_groups = self._group_files_by_size(valid_files)
+        logger.info(f"Found {len(size_groups)} unique file sizes")
+        
+        # For each size group, check MD5 hashes
+        for size, files in size_groups.items():
+            if len(files) > 1:  # Only check if there are multiple files of the same size
+                md5_groups = self._group_files_by_md5(files)
+                for md5, duplicate_files in md5_groups.items():
+                    if len(duplicate_files) > 1:  # Only process if there are actual duplicates
+                        self._process_duplicate_group(duplicate_files, {})
+        
+        # Analyze folder structures
+        self._analyze_folder_structures(folders)
+        
+        logger.info(f"Found {len(self.duplicate_groups)} groups of duplicate files")
+        logger.info(f"Found {len(self.duplicate_files_in_folders)} folders with duplicate files")
+
+    def _analyze_folder_structures(self, folders: List[Dict]) -> None:
+        """Analyze folder structures to identify folders containing duplicate files."""
+        # Create a mapping of folder IDs to their files
+        folder_files: Dict[str, Set[str]] = {}
+        for group in self.duplicate_groups:
+            for file in group.files:
+                if 'parents' in file:
+                    for parent_id in file['parents']:
+                        if parent_id not in folder_files:
+                            folder_files[parent_id] = set()
+                        folder_files[parent_id].add(file['id'])
+        
+        # Analyze each folder
+        for folder in folders:
+            folder_id = folder['id']
+            if folder_id in folder_files:
+                duplicate_files = folder_files[folder_id]
+                if duplicate_files:
+                    self.duplicate_files_in_folders[folder_id] = DuplicateFolder(
+                        folder_id,
+                        folder,
+                        duplicate_files
+                    ) 

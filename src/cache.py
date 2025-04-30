@@ -150,6 +150,28 @@ class MetadataCache:
         self._modified = True
         self._save(force=True)
 
+    def get_all_files(self) -> List[Dict]:
+        """Get all cached files."""
+        self._cleanup_expired()
+        return self._cache.get('all_files', [])
+
+    def get_all_folders(self) -> List[Dict]:
+        """Get all cached folders."""
+        self._cleanup_expired()
+        return self._cache.get('all_folders', [])
+
+    def cache_files(self, files: List[Dict]) -> None:
+        """Cache a list of files."""
+        self._cache['all_files'] = files
+        self._modified = True
+        self._save()
+
+    def cache_folders(self, folders: List[Dict]) -> None:
+        """Cache a list of folders."""
+        self._cache['all_folders'] = folders
+        self._modified = True
+        self._save()
+
     def __enter__(self):
         """Context manager entry."""
         return self

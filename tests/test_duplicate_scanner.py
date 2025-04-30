@@ -328,22 +328,28 @@ class TestDuplicateScanner(unittest.TestCase):
         folder = DuplicateFolder(folder_id, folder_meta, duplicate_files)
         
         # Test initial state
-        self.assertEqual(folder.folder_id, folder_id)
-        self.assertEqual(folder.folder_meta, folder_meta)
+        self.assertEqual(folder.id, folder_id)
+        self.assertEqual(folder.metadata, folder_meta)
         self.assertEqual(folder.duplicate_files, duplicate_files)
         self.assertEqual(folder.total_size, 0)
         
         # Test metadata update
-        file_metadata = {
-            'file1': {'size': '1024'},
-            'file2': {'size': '2048'}
+        new_metadata = {
+            'folder1': {
+                'id': 'folder1',
+                'name': 'Test Folder',
+                'size': '3072',
+                'mimeType': 'application/vnd.google-apps.folder'
+            }
         }
-        folder.update_metadata(file_metadata)
-        self.assertEqual(folder.total_size, 3072)
+        folder.update_metadata(new_metadata)
+        self.assertEqual(folder.size, 3072)
         
         # Test duplicate only check
-        self.assertTrue(folder.check_if_duplicate_only({'file1', 'file2'}))
-        self.assertFalse(folder.check_if_duplicate_only({'file1', 'file2', 'file3'}))
+        folder.total_files = {'file1', 'file2'}
+        self.assertTrue(folder.check_if_duplicate_only())
+        folder.total_files = {'file1', 'file2', 'file3'}
+        self.assertFalse(folder.check_if_duplicate_only())
 
     def test_duplicate_scanner(self):
         """Test DuplicateScanner class."""
@@ -369,11 +375,11 @@ class TestDuplicateScanner(unittest.TestCase):
         with patch.object(self.drive_api, 'get_file_metadata', side_effect=mock_get_metadata), \
              patch.object(self.drive_api, 'get_files_metadata_batch', side_effect=mock_get_metadata_batch):
             
-            scanner = DuplicateScanner(self.drive_api)
-            groups = scanner.scan()
+            scanner = DuplicateScanner(self.drive_api, self.test_cache)
+            scanner.scan()
             
-            self.assertEqual(len(groups), 1)  # One group of duplicates
-            self.assertEqual(len(groups[0].files), 2)  # Two files in the group
+            self.assertEqual(len(scanner.duplicate_groups), 1)  # One group of duplicates
+            self.assertEqual(len(scanner.duplicate_groups[0].files), 2)  # Two files in the group
 
     def test_batch_handler_operations(self):
         """Test BatchHandler operations and contract."""
