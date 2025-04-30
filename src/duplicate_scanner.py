@@ -8,7 +8,6 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import sys
 from collections import defaultdict
-import csv
 from datetime import datetime, timedelta
 import json
 import hashlib
@@ -17,23 +16,7 @@ from googleapiclient.http import BatchHttpRequest
 from typing import List, Dict, Set, Optional, Any, Callable
 from googleapiclient.discovery import Resource
 import time
-
-# Add CSV headers as a constant
-CSV_HEADERS = [
-    'File Name',
-    'Full Path',
-    'Size (Bytes)',
-    'Size (Human Readable)',
-    'File ID',
-    'MD5 Checksum',
-    'Duplicate Group ID',
-    'Parent Folder',
-    'Parent Folder ID',
-    'Duplicate File Name',
-    'Duplicate File Path',
-    'Duplicate File Size',
-    'Duplicate File ID'
-]
+from export import write_to_csv
 
 # Add these constants near the top of the file with other constants
 CACHE_FILE = 'drive_metadata_cache.json'
@@ -890,69 +873,6 @@ def handle_duplicate(drive_api: DriveAPI, file1: dict, file2: dict, duplicate_fo
             else:
                 print("Invalid choice. Please enter 1, 2, or s.")
 
-def generate_csv_filename():
-    """Generate a CSV filename with timestamp."""
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    return f'drive_duplicates_{timestamp}.csv'
-
-def write_to_csv(duplicate_groups, drive_api: DriveAPI):
-    """Write duplicate file information to CSV with minimal API calls."""
-    csv_filename = generate_csv_filename()
-    duplicate_group_id = 1
-    
-    with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=CSV_HEADERS)
-        writer.writeheader()
-        
-        for group in duplicate_groups:
-            for file in group.files:
-                file_meta = group.metadata.get(file['id'])
-                if file_meta:
-                    def prepare_file_row(file_meta):
-                        parent_id = file_meta.get('parents', [''])[0]
-                        return {
-                            'File Name': file_meta['name'],
-                            'Full Path': f"{parent_id}/{file_meta['name']}",
-                            'Size (Bytes)': file_meta.get('size', '0'),
-                            'Size (Human Readable)': get_human_readable_size(int(file_meta.get('size', 0))),
-                            'File ID': file_meta['id'],
-                            'MD5 Checksum': file_meta.get('md5Checksum', ''),
-                            'Duplicate Group ID': duplicate_group_id,
-                            'Parent Folder': parent_id,
-                            'Parent Folder ID': parent_id
-                        }
-
-                    # Write file to CSV
-                    writer.writerow(prepare_file_row(file_meta))
-            duplicate_group_id += 1
-
-    logging.info(f"CSV export completed: {csv_filename}")
-    return csv_filename
-
-def _filter_valid_files(files: List[Dict]) -> List[Dict]:
-    """Filter files that have valid MD5 checksums and non-zero size."""
-    return [
-        f for f in files 
-        if 'md5Checksum' in f and f.get('size', '0') != '0'
-    ]
-
-def _group_files_by_size(files: List[Dict]) -> Dict[str, List[Dict]]:
-    """Group files by their size."""
-    files_by_size = defaultdict(list)
-    for file in files:
-        size = file.get('size', '0')
-        if size != '0':  # Skip zero-size files
-            files_by_size[size].append(file)
-    return files_by_size
-
-def _group_files_by_md5(files: List[Dict]) -> Dict[str, List[Dict]]:
-    """Group files by their MD5 checksum."""
-    files_by_md5 = defaultdict(list)
-    for file in files:
-        if 'md5Checksum' in file:  # Skip files without MD5
-            files_by_md5[file['md5Checksum']].append(file)
-    return files_by_md5
-
 def _print_duplicate_group(files: List[Dict], metadata: Dict[str, dict]) -> None:
     """Print information about a group of duplicate files."""
     example_file = files[0]
@@ -1003,47 +923,6 @@ def _print_duplicate_folders_summary(drive_api: DriveAPI, duplicate_folders: Dic
         print(f"  - Total size: {get_human_readable_size(info['total_size'])}")
         print(f"  - Folder ID: {info['id']}")
 
-def _get_duplicate_only_folders(drive_api: DriveAPI, duplicate_folders: Dict[str, Set[str]]) -> List[Dict]:
-    """Get folders that only contain duplicate files, ordered by decreasing size."""
-    # Get all folder metadata in one batch
-    folder_ids = list(duplicate_folders.keys())
-    folder_metadata = drive_api.get_files_metadata_batch(folder_ids)
-    
-    # Get all files in these folders
-    all_files = drive_api.list_files(force_refresh=True)
-    folder_files = defaultdict(set)
-    for file in all_files:
-        for parent in file.get('parents', []):
-            if parent in folder_ids:
-                folder_files[parent].add(file['id'])
-    
-    # Find folders that only contain duplicates
-    duplicate_only_folders = []
-    for folder_id, duplicate_files in duplicate_folders.items():
-        folder_meta = folder_metadata.get(folder_id)
-        if not folder_meta:
-            continue
-            
-        # Get all files in this folder
-        all_folder_files = folder_files.get(folder_id, set())
-        
-        # If all files in the folder are duplicates, add it to the list
-        if all_folder_files.issubset(duplicate_files):
-            # Get metadata for all files in this folder
-            file_metadata = drive_api.get_files_metadata_batch(list(duplicate_files))
-            total_size = sum(int(meta.get('size', 0)) for meta in file_metadata.values())
-            
-            duplicate_only_folders.append({
-                'name': folder_meta.get('name', 'Unknown'),
-                'count': len(duplicate_files),
-                'id': folder_id,
-                'total_size': total_size
-            })
-    
-    # Sort by total size of duplicates (descending)
-    duplicate_only_folders.sort(key=lambda x: x['total_size'], reverse=True)
-    return duplicate_only_folders
-
 def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bool = False) -> List[List[Dict]]:
     """Find duplicate files in Google Drive with batched operations."""
     scanner = DuplicateScanner(drive_api)
@@ -1051,13 +930,6 @@ def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bo
     
     # Write duplicates to CSV if any were found
     if duplicate_groups:
-        duplicate_pairs = []
-        for group in duplicate_groups:
-            # Create pairs of files from each group
-            for i in range(len(group.files)):
-                for j in range(i + 1, len(group.files)):
-                    duplicate_pairs.append((group.files[i], group.files[j]))
-        
         csv_file = write_to_csv(duplicate_groups, drive_api)
         print(f"\nDuplicate pairs have been written to: {csv_file}")
     
@@ -1103,7 +975,8 @@ def main():
     scanner._print_summary(total_duplicates, total_wasted)
     
     # Export to CSV
-    write_to_csv(duplicate_groups, drive_api)
+    if duplicate_groups:
+        write_to_csv(duplicate_groups, drive_api)
 
 if __name__ == '__main__':
     main()
