@@ -5,18 +5,20 @@ import sys
 from pathlib import Path
 import tempfile
 import shutil
+import csv
 
 # Add parent directory to Python path to import modules
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils import get_human_readable_size
-from cache import MetadataCache
-from drive_api import DriveAPI
-from batch import BatchHandler
-from models import DuplicateGroup, DuplicateFolder
-from scanner import DuplicateScanner
-from export import write_to_csv
-from config import BATCH_SIZE
+from src.drive_api import DriveAPI
+from src.batch import BatchHandler
+from src.cache import MetadataCache
+from src.models import DuplicateGroup, DuplicateFolder
+from src.scanner import DuplicateScanner
+from src.export import write_to_csv
+from src.utils import get_human_readable_size
+from src.config import BATCH_SIZE
+from duplicate_scanner import main
 
 class TestDuplicateScanner(unittest.TestCase):
     """Test suite for duplicate scanner functionality."""
@@ -516,19 +518,138 @@ class TestDuplicateScanner(unittest.TestCase):
         """Test DriveAPI batch size limits."""
         # Setup
         mock_service = MagicMock()
-        api = DriveAPI(mock_service, self.test_cache)
-        
+        mock_service.files().get().execute.return_value = {'id': 'test'}
+        api = DriveAPI(mock_service)
+
         # Generate more file IDs than BATCH_SIZE
         file_ids = [f'id{i}' for i in range(BATCH_SIZE + 5)]
-        mock_responses = {f'id{i}': {'id': f'id{i}'} for i in range(BATCH_SIZE)}
         
-        with patch.object(BatchHandler, 'execute') as mock_execute, \
-             patch.object(BatchHandler, 'get_results', return_value=mock_responses):
-            
+        # Mock batch handler
+        mock_batch = MagicMock()
+        mock_batch.execute.return_value = None
+        mock_batch.get_results.return_value = {f'id{i}': {'id': f'id{i}'} for i in range(BATCH_SIZE)}
+        
+        with patch('src.drive_api.BatchHandler', return_value=mock_batch):
             # Test metadata batch
             api.get_files_metadata_batch(file_ids)
             # Should be called twice: once for BATCH_SIZE items, once for remaining 5
-            self.assertEqual(mock_execute.call_count, 2)
+            self.assertEqual(mock_batch.execute.call_count, 2)
+
+    def test_write_to_csv_with_duplicate_groups(self):
+        """Test writing to CSV with DuplicateGroup objects."""
+        # Create test data
+        files = [
+            {'id': 'id1', 'name': 'file1.txt', 'size': '1024'},
+            {'id': 'id2', 'name': 'file2.txt', 'size': '1024'}
+        ]
+        metadata = {
+            'id1': {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'parents': ['folder1']},
+            'id2': {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'parents': ['folder2']}
+        }
+        
+        group = DuplicateGroup(files, metadata)
+        groups = [group]
+        
+        # Mock DriveAPI
+        mock_drive_api = MagicMock()
+        mock_drive_api.get_file_metadata.side_effect = lambda x: {
+            'folder1': {'id': 'folder1', 'name': 'Folder 1'},
+            'folder2': {'id': 'folder2', 'name': 'Folder 2'}
+        }.get(x, {})
+        
+        # Test CSV export
+        filename = write_to_csv(groups, mock_drive_api)
+        
+        # Verify file was created
+        self.assertIsNotNone(filename)
+        self.assertTrue(os.path.exists(filename))
+        
+        # Verify CSV content
+        with open(filename, 'r') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            
+            # Should have 2 rows (each file compared with the other)
+            self.assertEqual(len(rows), 2)
+            
+            # Verify first row
+            self.assertEqual(rows[0]['File Name'], 'file1.txt')
+            self.assertEqual(rows[0]['Duplicate File Name'], 'file2.txt')
+            self.assertEqual(rows[0]['Parent Folder'], 'Folder 1')
+            self.assertEqual(rows[0]['Duplicate File Path'], 'Folder 2/file2.txt')
+            
+            # Verify second row
+            self.assertEqual(rows[1]['File Name'], 'file2.txt')
+            self.assertEqual(rows[1]['Duplicate File Name'], 'file1.txt')
+            self.assertEqual(rows[1]['Parent Folder'], 'Folder 2')
+            self.assertEqual(rows[1]['Duplicate File Path'], 'Folder 1/file1.txt')
+        
+        # Cleanup
+        os.remove(filename)
+
+    def test_scanner_with_cache(self):
+        """Test scanner initialization and operation with cache."""
+        # Create mock objects
+        mock_drive_api = MagicMock()
+        mock_cache = MagicMock()
+        
+        # Setup mock cache to return test files
+        test_files = [
+            {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'md5Checksum': 'abc'},
+            {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'md5Checksum': 'abc'}
+        ]
+        mock_cache.get_all_files.return_value = test_files
+        
+        # Create scanner
+        scanner = DuplicateScanner(mock_drive_api, mock_cache)
+        
+        # Test scan
+        scanner.scan()
+        
+        # Verify cache was used
+        mock_cache.get_all_files.assert_called_once()
+        
+        # Verify duplicate groups were found
+        self.assertEqual(len(scanner.duplicate_groups), 1)
+        self.assertEqual(len(scanner.duplicate_groups[0].files), 2)
+
+    def test_main_script_flow(self):
+        """Test the main script flow with mocked dependencies."""
+        # Create mock objects
+        mock_service = MagicMock()
+        mock_drive_api = MagicMock()
+        mock_cache = MagicMock()
+        
+        # Setup test data
+        test_files = [
+            {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'md5Checksum': 'abc'},
+            {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'md5Checksum': 'abc'}
+        ]
+        mock_cache.get_all_files.return_value = test_files
+        
+        # Setup mock drive_api
+        mock_drive_api_instance = MagicMock()
+        mock_drive_api_instance.list_files.return_value = test_files
+        mock_drive_api.return_value = mock_drive_api_instance
+        
+        # Patch dependencies and command-line arguments
+        with patch('sys.argv', ['duplicate_scanner.py']), \
+             patch('duplicate_scanner.get_service', return_value=mock_service), \
+             patch('duplicate_scanner.DriveAPI', mock_drive_api), \
+             patch('duplicate_scanner.MetadataCache', return_value=mock_cache), \
+             patch('duplicate_scanner.write_to_csv') as mock_write_csv:
+            
+            # Run main function
+            main()
+            
+            # Verify DriveAPI was created with service
+            mock_drive_api.assert_called_once_with(mock_service)
+            
+            # Verify scanner was created with cache
+            mock_cache.get_all_files.assert_called_once()
+            
+            # Verify CSV export was called with the duplicate groups
+            self.assertTrue(mock_write_csv.called)
 
 if __name__ == '__main__':
     unittest.main()
