@@ -372,6 +372,146 @@ class TestDuplicateScanner(unittest.TestCase):
         with self.assertRaises(Exception):
             find_duplicates(self.drive_api)
 
+    def test_metadata_cache_expiry(self):
+        """Test cache expiry functionality."""
+        # Set a value with timestamp
+        current_time = datetime.now()
+        self.test_cache.set('test_key', {'data': 'test_value'})
+        
+        # Mock datetime to simulate cache expiry
+        with patch('duplicate_scanner.datetime') as mock_datetime:
+            # Mock now() to return a time after expiry
+            mock_datetime.now.return_value = current_time + timedelta(hours=CACHE_EXPIRY_HOURS + 1)
+            
+            # Mock fromisoformat to return the original timestamp
+            def mock_fromisoformat(timestamp_str):
+                return current_time
+            mock_datetime.fromisoformat.side_effect = mock_fromisoformat
+            
+            # Force cleanup of expired entries
+            self.test_cache._cleanup_expired()
+            
+            # Value should be expired
+            self.assertIsNone(self.test_cache.get('test_key'))
+
+    def test_metadata_cache_persistence(self):
+        """Test cache persistence across instances."""
+        # Set values in first cache instance
+        with MetadataCache(self.test_cache_file) as cache1:
+            cache1.set('key1', 'value1')
+            cache1.update({'key2': 'value2'})
+        
+        # Load in second instance
+        with MetadataCache(self.test_cache_file) as cache2:
+            self.assertEqual(cache2.get('key1'), 'value1')
+            self.assertEqual(cache2.get('key2'), 'value2')
+
+    def test_drive_api_list_files_pagination(self):
+        """Test listing files with pagination."""
+        # Mock paginated responses
+        mock_list = Mock()
+        mock_list.execute.side_effect = [
+            {'files': [{'id': 'id1'}], 'nextPageToken': 'token1'},
+            {'files': [{'id': 'id2'}], 'nextPageToken': None}
+        ]
+        self.mock_files_service.list.return_value = mock_list
+        
+        result = self.drive_api.list_files()
+        
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]['id'], 'id1')
+        self.assertEqual(result[1]['id'], 'id2')
+        self.assertEqual(mock_list.execute.call_count, 2)
+
+    def test_drive_api_list_files_cache(self):
+        """Test file listing with cache."""
+        mock_files = self._setup_mock_files()
+        
+        # First call should cache results
+        self.drive_api.list_files = Mock(return_value=mock_files)
+        result1 = self.drive_api.list_files()
+        
+        # Second call should use cache
+        result2 = self.drive_api.list_files()
+        
+        self.assertEqual(result1, result2)
+        self.assertEqual(self.drive_api.list_files.call_count, 2)
+
+    def test_drive_api_get_files_metadata_batch_size_limit(self):
+        """Test batch size limits in metadata fetching."""
+        # Create more files than BATCH_SIZE
+        file_ids = [f'id{i}' for i in range(BATCH_SIZE + 10)]
+        
+        with patch('duplicate_scanner.BatchHandler') as mock_handler:
+            mock_instance = mock_handler.return_value
+            mock_instance.results = {f'id{i}': {'id': f'id{i}'} for i in range(len(file_ids))}
+            
+            result = self.drive_api.get_files_metadata_batch(file_ids)
+            
+            # Should execute multiple batches
+            self.assertGreater(mock_instance.execute.call_count, 1)
+            self.assertEqual(len(result), len(file_ids))
+
+    def test_find_duplicates_grouping(self):
+        """Test duplicate file grouping logic."""
+        mock_files = [
+            {'id': 'id1', 'name': 'file1.txt', 'md5Checksum': 'hash1', 'size': '1024'},
+            {'id': 'id2', 'name': 'file2.txt', 'md5Checksum': 'hash1', 'size': '1024'},  # Duplicate
+            {'id': 'id3', 'name': 'file3.txt', 'md5Checksum': 'hash2', 'size': '1024'},  # Same size, different hash
+            {'id': 'id4', 'name': 'file4.txt', 'md5Checksum': 'hash1', 'size': '2048'}   # Different size
+        ]
+        
+        self.drive_api.list_files = Mock(return_value=mock_files)
+        self.drive_api.get_files_metadata_batch = Mock(return_value=self._setup_mock_metadata())
+        
+        result = find_duplicates(self.drive_api)
+        
+        # Should only find one group of duplicates (id1 and id2)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result[0]), 2)
+        self.assertEqual({f['id'] for f in result[0]}, {'id1', 'id2'})
+
+    def test_find_duplicates_folder_tracking(self):
+        """Test duplicate folder tracking."""
+        mock_files = self._setup_mock_files()
+        mock_metadata = {
+            'id1': {'id': 'id1', 'name': 'file1.txt', 'parents': ['folder1'], 'size': '1024'},
+            'id2': {'id': 'id2', 'name': 'file2.txt', 'parents': ['folder1', 'folder2'], 'size': '1024'}
+        }
+        
+        self.drive_api.list_files = Mock(return_value=mock_files)
+        self.drive_api.get_files_metadata_batch = Mock(return_value=mock_metadata)
+        
+        result = find_duplicates(self.drive_api)
+        
+        # Should track both folders containing duplicates
+        self.assertEqual(len(result), 1)  # One group of duplicates
+        self.assertEqual(len(result[0]), 2)  # Two files in the group
+
+    def test_write_to_csv_headers(self):
+        """Test CSV export headers and format."""
+        mock_files = self._setup_mock_files()
+        mock_metadata = self._setup_mock_metadata()
+        
+        self.drive_api.get_file_metadata = Mock(side_effect=lambda x: mock_metadata.get(x))
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            csv_file = write_to_csv([(mock_files[0], mock_files[1])], self.drive_api)
+            
+            with open(csv_file, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                headers = reader.fieldnames
+                
+                # Verify all required headers are present
+                required_headers = [
+                    'File Name', 'Full Path', 'Size (Bytes)', 'Size (Human Readable)',
+                    'File ID', 'MD5 Checksum', 'Duplicate Group ID', 'Parent Folder',
+                    'Parent Folder ID', 'Duplicate File Name', 'Duplicate File Path',
+                    'Duplicate File Size', 'Duplicate File ID'
+                ]
+                self.assertEqual(set(headers), set(required_headers))
+
 if __name__ == '__main__':
     unittest.main()
     
