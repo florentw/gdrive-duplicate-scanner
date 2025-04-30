@@ -70,51 +70,35 @@ class MetadataCache:
     
     def __init__(self, cache_file: str = CACHE_FILE):
         self._cache_file = cache_file
+        self._temp_file = f"{cache_file}.tmp"
         self._cache = {}
         self._last_save = datetime.now()
+        self._last_cleanup = datetime.now()
         self._modified = False
         self._load()
 
-    def _load(self) -> None:
-        """Load cache from disk if valid."""
-        if not os.path.exists(self._cache_file):
-            logging.info("No cache file found, starting fresh")
-            self._cache = {}
+    def _cleanup_expired(self) -> None:
+        """Remove expired entries from cache."""
+        if datetime.now() - self._last_cleanup < timedelta(hours=1):
             return
 
-        try:
-            with open(self._cache_file, 'r') as f:
-                data = json.load(f)
+        expired_keys = []
+        for key, value in self._cache.items():
+            if isinstance(value, dict) and 'timestamp' in value:
+                try:
+                    timestamp = datetime.fromisoformat(value['timestamp'])
+                    if datetime.now() - timestamp > timedelta(hours=CACHE_EXPIRY_HOURS):
+                        expired_keys.append(key)
+                except (ValueError, TypeError):
+                    expired_keys.append(key)
 
-            # Skip if cache is expired or invalid
-            cache_time = datetime.fromisoformat(data.get('timestamp', '2000-01-01'))
-            if datetime.now() - cache_time > timedelta(hours=CACHE_EXPIRY_HOURS):
-                logging.info("Cache has expired, starting fresh")
-                self._cache = {}
-                return
-                
-            if data.get('cache_key') != get_cache_key():
-                logging.info("Cache key mismatch, starting fresh")
-                self._cache = {}
-                return
+        if expired_keys:
+            for key in expired_keys:
+                self._cache.pop(key, None)
+            self._modified = True
+            self._save(force=True)
 
-            # The cache structure is {"files": {"all_files": [...], ...}}
-            files_data = data.get('files', {})
-            if not files_data:
-                logging.info("Empty cache data, starting fresh")
-                self._cache = {}
-                return
-
-            self._cache = files_data
-            if self._cache:
-                cached_files = self._cache.get('all_files', [])
-                logging.info(f"Loaded cache with {len(cached_files)} files")
-            else:
-                logging.info("No valid data in cache, starting fresh")
-
-        except Exception as e:
-            logging.error(f"Failed to load cache: {e}")
-            self._cache = {}
+        self._last_cleanup = datetime.now()
 
     def _save(self, force: bool = False) -> None:
         """Save cache to disk if needed."""
@@ -130,8 +114,13 @@ class MetadataCache:
                 'cache_key': get_cache_key(),
                 'files': self._cache
             }
-            with open(self._cache_file, 'w') as f:
+            
+            # Write to temporary file first
+            with open(self._temp_file, 'w') as f:
                 json.dump(data, f)
+            
+            # Atomic rename
+            os.replace(self._temp_file, self._cache_file)
             
             self._last_save = datetime.now()
             self._modified = False
@@ -140,19 +129,59 @@ class MetadataCache:
 
         except Exception as e:
             logging.error(f"Failed to save cache: {e}")
+            # Clean up temp file if it exists
+            try:
+                os.remove(self._temp_file)
+            except OSError:
+                pass
+
+    def _load(self) -> None:
+        """Load cache from disk."""
+        try:
+            if os.path.exists(self._cache_file):
+                with open(self._cache_file, 'r') as f:
+                    data = json.load(f)
+                    
+                    # Skip if cache key doesn't match
+                    if data.get('cache_key') != get_cache_key():
+                        logging.info("Cache key mismatch, starting fresh")
+                        self._cache = {}
+                        self._last_save = None
+                        self._save(force=True)  # Save empty cache
+                        return
+                    
+                    self._cache = data.get('files', {})
+                    self._last_save = datetime.fromisoformat(data.get('timestamp', datetime.now().isoformat()))
+                    
+                    # Check cache expiry
+                    if self._last_save and datetime.now() - self._last_save > timedelta(hours=CACHE_EXPIRY_HOURS):
+                        self._cache = {}  # Clear the cache
+                        self._last_save = None
+                        self._save(force=True)  # Save empty cache
+        except Exception as e:
+            logging.error(f"Failed to load cache: {e}")
+            self._cache = {}
+            self._last_save = None
 
     def get(self, key: str) -> Any:
         """Retrieve item from cache."""
+        self._cleanup_expired()  # Check for expired entries
         return self._cache.get(key)
 
     def set(self, key: str, value: Any) -> None:
         """Store single item in cache."""
+        if isinstance(value, dict):
+            value['timestamp'] = datetime.now().isoformat()
         self._cache[key] = value
         self._modified = True
         self._save()
 
     def update(self, items: Dict[str, Any]) -> None:
         """Store multiple items in cache."""
+        timestamp = datetime.now().isoformat()
+        for key, value in items.items():
+            if isinstance(value, dict):
+                value['timestamp'] = timestamp
         self._cache.update(items)
         self._modified = True
         self._save()
@@ -197,11 +226,16 @@ def get_human_readable_size(size_bytes):
 def get_service():
     """Authorize and return Google Drive service."""
     creds = None
-    if os.path.exists('token.json'):
+    token_file = 'token.json'
+    
+    # Check file permissions
+    if os.path.exists(token_file):
         try:
-            with open('token.json', 'rb') as token:
+            # Ensure token file has correct permissions
+            os.chmod(token_file, 0o600)
+            with open(token_file, 'rb') as token:
                 creds = pickle.load(token)
-        except (pickle.PickleError, IOError) as e:
+        except (pickle.PickleError, IOError, PermissionError) as e:
             logging.error(f"Error loading credentials: {e}")
             creds = None
 
@@ -209,6 +243,10 @@ def get_service():
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
+                # Save refreshed credentials
+                with open(token_file, 'wb') as token:
+                    pickle.dump(creds, token)
+                os.chmod(token_file, 0o600)  # Set secure permissions
             except Exception as e:
                 logging.error(f"Error refreshing credentials: {e}")
                 creds = None
@@ -217,13 +255,18 @@ def get_service():
             try:
                 flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
                 creds = flow.run_local_server(port=0)
-                with open('token.json', 'wb') as token:
+                with open(token_file, 'wb') as token:
                     pickle.dump(creds, token)
+                os.chmod(token_file, 0o600)  # Set secure permissions
             except Exception as e:
                 logging.error(f"Error creating new credentials: {e}")
                 raise SystemExit("Failed to authenticate with Google Drive")
 
-    return build('drive', 'v3', credentials=creds)
+    try:
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        logging.error(f"Error building Drive service: {e}")
+        raise SystemExit("Failed to initialize Google Drive service")
 
 class BatchHandler:
     """Generic handler for batching Google Drive API requests."""
@@ -249,12 +292,14 @@ class BatchHandler:
         cached = self.cache.get(file_id)
         if cached:
             self.results[file_id] = cached
+            self._updates[file_id] = cached
+            # Don't increment count for cached files
             return
 
         if self.count >= BATCH_SIZE:
             self.execute()
 
-        def callback(_, response, exception):
+        def callback(request_id, response, exception):
             if exception:
                 logging.warning(f"Failed to fetch metadata for {file_id} in batch: {exception}")
                 self.results[file_id] = None
@@ -274,7 +319,7 @@ class BatchHandler:
         if self.count >= BATCH_SIZE:
             self.execute()
 
-        def callback(_, response, exception):
+        def callback(request_id, response, exception):
             if exception:
                 logging.error(f"Failed to trash file {file_id}: {exception}")
                 self.results[file_id] = False
@@ -304,6 +349,27 @@ class BatchHandler:
 
         except Exception as e:
             logging.error(f"Batch execution failed: {e}")
+            # Retry failed requests individually with exponential backoff
+            for file_id in list(self._updates.keys()):
+                if self.results.get(file_id) is None:
+                    retries = 0
+                    while retries < MAX_RETRIES:
+                        try:
+                            response = self.service.files().get(
+                                fileId=file_id,
+                                fields='*'
+                            ).execute()
+                            self.results[file_id] = response
+                            self._updates[file_id] = response
+                            break
+                        except Exception as retry_e:
+                            retries += 1
+                            if retries == MAX_RETRIES:
+                                logging.error(f"Retry failed for {file_id}: {retry_e}")
+                            else:
+                                delay = RETRY_DELAY * (2 ** (retries - 1))
+                                logging.warning(f"Retry {retries} for {file_id}, waiting {delay}s")
+                                time.sleep(delay)
         finally:
             # Reset state
             self.batch = self.service.new_batch_http_request()
@@ -393,21 +459,25 @@ def get_files_metadata_batch(drive_api: DriveAPI, file_ids: list[str]) -> Dict[s
         batch_ids = file_ids[i:i + BATCH_SIZE]
         logging.info(f"Processing batch {i//BATCH_SIZE + 1} of {(len(file_ids) + BATCH_SIZE - 1)//BATCH_SIZE}")
         
-        handler = BatchHandler(drive_api.service, drive_api.cache)
-        for file_id in batch_ids:
-            handler.add_metadata_request(file_id)
-        
-        # Execute the batch
-        handler.execute()
-        
-        # Check for failed requests
-        for file_id in batch_ids:
-            if file_id not in handler.results or handler.results[file_id] is None:
-                failed_ids.add(file_id)
-            else:
-                results[file_id] = handler.results[file_id]
+        try:
+            handler = BatchHandler(drive_api.service, drive_api.cache)
+            for file_id in batch_ids:
+                handler.add_metadata_request(file_id)
+            
+            # Execute the batch
+            handler.execute()
+            
+            # Check for failed requests
+            for file_id in batch_ids:
+                if file_id not in handler.results or handler.results[file_id] is None:
+                    failed_ids.add(file_id)
+                else:
+                    results[file_id] = handler.results[file_id]
+        except Exception as e:
+            logging.error(f"Batch processing failed: {e}")
+            failed_ids.update(batch_ids)
     
-    # Retry failed requests individually
+    # Retry failed requests individually with exponential backoff
     if failed_ids:
         logging.info(f"Retrying {len(failed_ids)} failed requests")
         for file_id in failed_ids:
@@ -425,8 +495,10 @@ def get_files_metadata_batch(drive_api: DriveAPI, file_ids: list[str]) -> Dict[s
                     if retries == MAX_RETRIES:
                         logging.error(f"Failed to fetch metadata for {file_id} after {MAX_RETRIES} retries: {e}")
                     else:
-                        logging.warning(f"Retry {retries} for {file_id}")
-                        time.sleep(RETRY_DELAY)
+                        # Exponential backoff
+                        delay = RETRY_DELAY * (2 ** (retries - 1))
+                        logging.warning(f"Retry {retries} for {file_id}, waiting {delay}s")
+                        time.sleep(delay)
     
     return results
 
@@ -437,14 +509,20 @@ def move_files_to_trash_batch(drive_api: DriveAPI, file_ids: list[str]) -> Dict[
     # Process files in smaller batches
     for i in range(0, len(file_ids), BATCH_SIZE):
         batch_ids = file_ids[i:i + BATCH_SIZE]
-        handler = BatchHandler(drive_api.service, drive_api.cache)  # Use drive_api.service instead of drive_api
-        
-        for file_id in batch_ids:
-            handler.add_trash_request(file_id)
-        
-        # Execute the batch
-        handler.execute()
-        results.update(handler.results)
+        try:
+            handler = BatchHandler(drive_api.service, drive_api.cache)
+            
+            for file_id in batch_ids:
+                handler.add_trash_request(file_id)
+            
+            # Execute the batch
+            handler.execute()
+            results.update(handler.results)
+        except Exception as e:
+            logging.error(f"Batch trash operation failed: {e}")
+            # Mark all files in this batch as failed
+            for file_id in batch_ids:
+                results[file_id] = False
     
     return results
 

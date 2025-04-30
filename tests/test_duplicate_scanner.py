@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import shutil
 from io import StringIO
+from datetime import datetime, timedelta
 
 # Add parent directory to Python path to import duplicate_scanner
 sys.path.append(str(Path(__file__).parent.parent))
@@ -18,7 +19,13 @@ from duplicate_scanner import (
     write_to_csv,
     find_duplicates,
     MetadataCache,
-    DriveAPI
+    DriveAPI,
+    BatchHandler,
+    get_files_metadata_batch,
+    move_files_to_trash_batch,
+    CACHE_EXPIRY_HOURS,
+    BATCH_SIZE,
+    SAVE_INTERVAL_MINUTES
 )
 
 class TestDuplicateScanner(unittest.TestCase):
@@ -27,6 +34,8 @@ class TestDuplicateScanner(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures before each test method."""
         self.mock_service = Mock()
+        self.mock_files_service = Mock()
+        self.mock_service.files.return_value = self.mock_files_service
         self.test_dir = tempfile.mkdtemp()
         self.test_cache_file = os.path.join(self.test_dir, 'test_cache.json')
         self.test_cache = MetadataCache(self.test_cache_file)
@@ -112,6 +121,97 @@ class TestDuplicateScanner(unittest.TestCase):
             self.test_cache._save(force=True)
             # Cache should still work in memory
             self.assertEqual(self.test_cache.get('test_key'), 'test_value')
+
+    def test_metadata_cache_context_manager(self):
+        """Test cache context manager functionality."""
+        with MetadataCache(self.test_cache_file) as cache:
+            cache.set('test_key', 'test_value')
+            self.assertEqual(cache.get('test_key'), 'test_value')
+        
+        # Cache should be saved after context exit
+        new_cache = MetadataCache(self.test_cache_file)
+        self.assertEqual(new_cache.get('test_key'), 'test_value')
+
+    def test_get_files_metadata_batch(self):
+        """Test batch metadata fetching."""
+        mock_files = [
+            {'id': 'id1', 'name': 'file1.txt'},
+            {'id': 'id2', 'name': 'file2.txt'}
+        ]
+        
+        mock_responses = {
+            'id1': {'id': 'id1', 'name': 'file1.txt', 'size': '1024'},
+            'id2': {'id': 'id2', 'name': 'file2.txt', 'size': '2048'}
+        }
+        
+        # Mock batch handler
+        with patch('duplicate_scanner.BatchHandler') as mock_handler:
+            mock_instance = mock_handler.return_value
+            mock_instance.results = mock_responses
+            
+            result = get_files_metadata_batch(self.drive_api, ['id1', 'id2'])
+            
+            self.assertEqual(result, mock_responses)
+            self.assertEqual(mock_instance.add_metadata_request.call_count, 2)
+            mock_instance.execute.assert_called_once()
+
+    def test_get_files_metadata_batch_retry(self):
+        """Test batch metadata fetching with retries."""
+        # Mock the files().get() request
+        mock_get = Mock()
+        mock_get.execute = Mock(side_effect=[
+            Exception("API Error"),  # First call fails
+            {'id': 'test_id', 'name': 'test.txt'}  # Second call succeeds
+        ])
+        self.mock_files_service.get.return_value = mock_get
+        
+        # Set up batch request to fail
+        def mock_add(request, callback):
+            callback('test_id', None, Exception("API Error"))
+        
+        mock_batch = Mock()
+        mock_batch.add = Mock(side_effect=mock_add)
+        mock_batch.execute = Mock()
+        self.mock_service.new_batch_http_request.return_value = mock_batch
+        
+        # Test the contract: should get metadata after retry
+        result = get_files_metadata_batch(self.drive_api, ['test_id'])
+        
+        # Verify the contract: should get metadata after retry
+        self.assertIn('test_id', result)
+        self.assertEqual(result['test_id']['name'], 'test.txt')
+        # Verify retry behavior
+        self.assertEqual(mock_get.execute.call_count, 2)  # One initial failure, one success
+
+    def test_move_files_to_trash_batch(self):
+        """Test batch trash operations."""
+        mock_files = ['id1', 'id2']
+        
+        # Mock successful trash operations
+        with patch('duplicate_scanner.BatchHandler') as mock_handler:
+            mock_instance = mock_handler.return_value
+            mock_instance.results = {'id1': True, 'id2': True}
+            
+            result = move_files_to_trash_batch(self.drive_api, mock_files)
+            
+            self.assertEqual(result, {'id1': True, 'id2': True})
+            self.assertEqual(mock_instance.add_trash_request.call_count, 2)
+            mock_instance.execute.assert_called_once()
+
+    def test_move_files_to_trash_batch_errors(self):
+        """Test batch trash operations with errors."""
+        mock_files = ['id1', 'id2']
+        
+        # Mock failed trash operations
+        with patch('duplicate_scanner.BatchHandler') as mock_handler:
+            mock_instance = mock_handler.return_value
+            mock_instance.results = {'id1': False, 'id2': True}
+            
+            result = move_files_to_trash_batch(self.drive_api, mock_files)
+            
+            self.assertEqual(result, {'id1': False, 'id2': True})
+            self.assertEqual(mock_instance.add_trash_request.call_count, 2)
+            mock_instance.execute.assert_called_once()
 
     def test_get_file_metadata_caching(self):
         """Test that get_file_metadata caches results."""
@@ -345,8 +445,8 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_files = self._setup_mock_files()
         with patch.object(self.drive_api, 'list_files', return_value=mock_files), \
              patch('duplicate_scanner.get_files_metadata_batch', side_effect=Exception("API Error")):
-            duplicate_groups = find_duplicates(self.drive_api, delete=False, force_refresh=True)
-            self.assertEqual(duplicate_groups, [])  # Should return empty list on error
+            with self.assertRaises(Exception):
+                find_duplicates(self.drive_api, delete=False, force_refresh=True)
 
 if __name__ == '__main__':
     unittest.main()
