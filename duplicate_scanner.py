@@ -804,6 +804,19 @@ def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bo
                 print(f"  - Total size: {get_human_readable_size(folder['total_size'])}")
                 print(f"  - Folder ID: {folder['id']}")
 
+    # Write duplicates to CSV if any were found
+    if duplicate_groups:
+        # Create pairs of files for CSV export
+        duplicate_pairs = []
+        for group in duplicate_groups:
+            # For each group, create pairs of files
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    duplicate_pairs.append((group[i], group[j]))
+        
+        csv_file = write_to_csv(duplicate_pairs, drive_api)
+        print(f"\nDuplicate information written to: {csv_file}")
+
     return duplicate_groups
 
 def _handle_group_deletion(drive_api: DriveAPI, files: List[dict], metadata: Dict[str, dict]):
