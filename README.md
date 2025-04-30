@@ -57,15 +57,16 @@ The author will not be held responsible for any data loss that may occur as a re
 ## Installation
 
 1. Clone the repository:
-
 ```bash
 git clone https://github.com/moraneus/G-Drive-Remove-Duplicates.git
 cd G-Drive-Remove-Duplicates
 ```
-2. Install the required Python packages:
+
+2. Install the package in development mode:
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
+
 3. Setup Google Cloud Project:
 	1. Create Google Cloud project.
 	2. Enable the Google Drive API.
@@ -112,9 +113,9 @@ The script provides detailed output including:
 
 The project includes a comprehensive test suite to ensure reliability and correctness. To run the tests:
 
-1. Make sure you have all dependencies installed:
+1. Make sure you have the package installed in development mode:
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 2. Run all tests:
@@ -140,18 +141,6 @@ python3 -m coverage run -m pytest tests/
 # Generate coverage report
 python3 -m coverage report --show-missing
 ```
-
-The current test coverage report shows:
-- Overall coverage: 86%
-- Key module coverage:
-  - config.py: 100%
-  - export.py: 100%
-  - batch.py: 86%
-  - drive_api.py: 86%
-  - models.py: 80%
-  - cache.py: 73%
-  - scanner.py: 62%
-  - utils.py: 92%
 
 The test suite includes tests for:
 - File metadata fetching and caching
