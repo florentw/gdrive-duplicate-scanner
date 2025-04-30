@@ -1,5 +1,5 @@
-google-auth-oauthlib
-google-auth-httplib2
-google-api-python-client
-google-auth
-httplib2
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
+google-api-python-client>=2.0.0
+pytest>=7.0.0
+pytest-cov>=4.0.0

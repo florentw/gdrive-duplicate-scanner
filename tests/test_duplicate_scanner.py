@@ -23,7 +23,10 @@ from duplicate_scanner import (
     BatchHandler,
     CACHE_EXPIRY_HOURS,
     BATCH_SIZE,
-    SAVE_INTERVAL_MINUTES
+    SAVE_INTERVAL_MINUTES,
+    DuplicateGroup,
+    DuplicateFolder,
+    DuplicateScanner
 )
 
 class TestDuplicateScanner(unittest.TestCase):
@@ -680,6 +683,92 @@ class TestDuplicateScanner(unittest.TestCase):
                 'Duplicate File Size', 'Duplicate File ID'
             ]
             self.assertEqual(set(headers), set(required_headers))
+
+    def test_duplicate_group(self):
+        """Test DuplicateGroup class functionality."""
+        # Create test data
+        files = [
+            {'id': 'id1', 'name': 'file1.txt', 'size': '1024'},
+            {'id': 'id2', 'name': 'file2.txt', 'size': '1024'}
+        ]
+        metadata = {
+            'id1': {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'parents': ['folder1']},
+            'id2': {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'parents': ['folder2']}
+        }
+        
+        # Create DuplicateGroup instance
+        group = DuplicateGroup(files, metadata)
+        
+        # Test properties
+        self.assertEqual(group.total_size, 2048)  # 1024 * 2
+        self.assertEqual(group.wasted_space, 1024)  # 1024 * (2-1)
+        self.assertEqual(set(group.get_parent_folders()), {'folder1', 'folder2'})
+
+    def test_duplicate_folder(self):
+        """Test DuplicateFolder class functionality."""
+        # Create test data
+        folder_id = 'folder1'
+        folder_meta = {'id': folder_id, 'name': 'Test Folder'}
+        duplicate_files = {'file1', 'file2'}  # Files that have duplicates elsewhere
+        
+        # Create DuplicateFolder instance
+        folder = DuplicateFolder(folder_id, folder_meta, duplicate_files)
+        
+        # Test basic properties
+        self.assertEqual(folder.id, folder_id)
+        self.assertEqual(folder.name, 'Test Folder')
+        self.assertEqual(folder.duplicate_files, duplicate_files)
+        
+        # Test duplicate-only check
+        # A folder is duplicate-only if every file in it has a duplicate elsewhere
+        self.assertTrue(folder.check_if_duplicate_only({'file1', 'file2'}))  # All files have duplicates elsewhere
+        self.assertTrue(folder.check_if_duplicate_only({'file1'}))  # Single file has duplicate elsewhere
+        self.assertFalse(folder.check_if_duplicate_only({'file1', 'file3'}))  # file3 has no duplicate elsewhere
+        
+        # Test metadata update
+        file_metadata = {
+            'file1': {'size': '1024'},
+            'file2': {'size': '2048'}
+        }
+        folder.update_metadata(file_metadata)
+        self.assertEqual(folder.total_size, 3072)  # 1024 + 2048
+
+    def test_duplicate_scanner(self):
+        """Test DuplicateScanner class functionality."""
+        # Mock file list response
+        mock_files = [
+            {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'md5Checksum': 'hash1', 'parents': ['folder1']},
+            {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'md5Checksum': 'hash1', 'parents': ['folder2']},
+            {'id': 'id3', 'name': 'file3.txt', 'size': '2048', 'md5Checksum': 'hash2', 'parents': ['folder1']}
+        ]
+        self.drive_api.list_files = Mock(return_value=mock_files)
+
+        # Mock metadata responses
+        def mock_get_metadata(file_id):
+            return {
+                'id': file_id,
+                'name': f'file{file_id[-1]}.txt',
+                'size': '1024',
+                'md5Checksum': 'hash1',
+                'parents': [f'folder{file_id[-1]}'],
+                'mimeType': 'text/plain',
+                'trashed': False
+            }
+        self.drive_api.get_file_metadata = Mock(side_effect=mock_get_metadata)
+        
+        # Mock batch metadata responses
+        def mock_get_metadata_batch(file_ids):
+            return {file_id: mock_get_metadata(file_id) for file_id in file_ids}
+        self.drive_api.get_files_metadata_batch = Mock(side_effect=mock_get_metadata_batch)
+
+        # Create scanner and run scan
+        scanner = DuplicateScanner(self.drive_api)
+        result = scanner.scan()
+
+        # Verify results
+        self.assertEqual(len(result), 1)  # One group of duplicates
+        self.assertEqual(len(result[0].files), 2)  # Two files in the group
+        self.assertEqual(len(scanner.duplicate_folders), 2)  # Two folders with duplicates
 
 if __name__ == '__main__':
     unittest.main()

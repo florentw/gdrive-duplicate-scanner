@@ -269,37 +269,50 @@ def get_service():
         raise SystemExit("Failed to initialize Google Drive service")
 
 class BatchHandler:
-    """Generic handler for batching Google Drive API requests."""
+    """Generic handler for batching Google Drive API requests.
+    
+    This class manages batch operations for both metadata fetching and trash operations.
+    It handles caching, retries, and maintains separate tracking for cached vs API results.
+    """
     
     def __init__(self, service: Resource, cache: MetadataCache):
         """Initialize batch handler.
         
         Args:
             service: Google Drive API service instance
-            cache: MetadataCache instance
+            cache: MetadataCache instance for storing/retrieving cached results
         """
         self.service = service
         self.cache = cache
         self.batch = service.new_batch_http_request()
-        self.results = {}
-        self.count = 0
-        self._updates = {}
-        self._removals = []
-        self._failed_requests = set()
-        self._cached_results = {}  # Track cached results separately
+        self.results = {}  # Store API call results
+        self.count = 0  # Track number of requests in current batch
+        self._updates = {}  # Track successful updates for cache
+        self._removals = []  # Track files to remove from cache
+        self._failed_requests = set()  # Track failed requests for retry
+        self._cached_results = {}  # Store results from cache hits
 
     def add_metadata_request(self, file_id: str) -> None:
-        """Add metadata fetch request to batch."""
-        # Check cache first
+        """Add metadata fetch request to batch.
+        
+        Checks cache first, then adds to batch if not cached.
+        Automatically executes batch if size limit is reached.
+        """
+        # Check cache first to avoid unnecessary API calls
         cached = self.cache.get(file_id)
         if cached:
             self._cached_results[file_id] = cached
             return  # Don't count cached files in batch size
 
+        # Execute current batch if we've reached the size limit
         if self.count >= BATCH_SIZE:
             self.execute()
 
         def callback(request_id, response, exception):
+            """Handle batch request response.
+            
+            Updates results and tracks failures for retry logic.
+            """
             if exception:
                 logging.warning(f"Failed to fetch metadata for {file_id} in batch: {exception}")
                 self.results[file_id] = None
@@ -308,6 +321,7 @@ class BatchHandler:
                 self.results[file_id] = response
                 self._updates[file_id] = response
 
+        # Add request to batch
         self.batch.add(
             self.service.files().get(fileId=file_id, fields='*'),
             callback=callback
@@ -335,7 +349,11 @@ class BatchHandler:
         self.count += 1
 
     def execute(self) -> None:
-        """Execute batch requests if any pending."""
+        """Execute batch requests if any pending.
+        
+        Handles successful updates, cache management, and error recovery.
+        Resets batch state for next operation.
+        """
         if not self.count:
             return
             
@@ -349,20 +367,24 @@ class BatchHandler:
                 self.cache.remove(self._removals)
         except Exception as e:
             logging.error(f"Batch execution failed: {e}")
-            # Mark all pending requests as failed
+            # Mark all pending requests as failed for retry
             for file_id in self._updates:
                 if file_id not in self.results:
                     self.results[file_id] = None
                     self._failed_requests.add(file_id)
         finally:
-            # Reset for next batch
+            # Reset batch state for next operation
             self.batch = self.service.new_batch_http_request()
             self.count = 0
             self._updates = {}
             self._removals = []
 
     def get_results(self) -> Dict[str, Any]:
-        """Get combined results from both cache and API calls."""
+        """Get combined results from both cache and API calls.
+        
+        Returns:
+            Dict mapping file IDs to their metadata, combining cached and API results.
+        """
         results = self.results.copy()
         results.update(self._cached_results)
         return results
@@ -372,7 +394,11 @@ class BatchHandler:
         return self._failed_requests
 
 class DriveAPI:
-    """Simplified Google Drive API wrapper with caching and batching."""
+    """Simplified Google Drive API wrapper with caching and batching.
+    
+    Provides high-level operations for file management with automatic
+    caching, batching, and retry logic.
+    """
     
     def __init__(self, service: Resource, cache: Optional[MetadataCache] = None):
         self.service = service
@@ -442,11 +468,23 @@ class DriveAPI:
             return None
 
     def get_files_metadata_batch(self, file_ids: list[str]) -> Dict[str, dict]:
-        """Get metadata for multiple files in batches with retry logic."""
+        """Get metadata for multiple files in batches with retry logic.
+        
+        Implements a three-step process:
+        1. Check cache for each file
+        2. Batch fetch uncached files
+        3. Retry failed requests individually
+        
+        Args:
+            file_ids: List of file IDs to fetch metadata for
+            
+        Returns:
+            Dict mapping file IDs to their metadata
+        """
         results = {}
         files_to_fetch = []
         
-        # Check cache first
+        # Step 1: Check cache for each file
         for file_id in file_ids:
             cached_metadata = self.cache.get(file_id)
             if cached_metadata is not None:
@@ -457,7 +495,7 @@ class DriveAPI:
         if not files_to_fetch:
             return results
         
-        # Process remaining files in smaller batches
+        # Step 2: Process remaining files in smaller batches
         for i in range(0, len(files_to_fetch), BATCH_SIZE):
             batch_ids = files_to_fetch[i:i + BATCH_SIZE]
             logging.info(f"Processing batch {i//BATCH_SIZE + 1} of {(len(files_to_fetch) + BATCH_SIZE - 1)//BATCH_SIZE}")
@@ -478,7 +516,7 @@ class DriveAPI:
                     if file_id not in results:
                         results[file_id] = None
             
-            # Retry failed requests individually
+            # Step 3: Retry failed requests individually with exponential backoff
             failed_requests = handler.get_failed_requests()
             for file_id in failed_requests:
                 if file_id not in results or results[file_id] is None:
@@ -546,6 +584,276 @@ class DriveAPI:
                                 time.sleep(delay)
         
         return results
+
+class DuplicateGroup:
+    """Represents a group of duplicate files with their metadata."""
+    
+    def __init__(self, files: List[Dict], metadata: Dict[str, dict]):
+        self.files = files
+        self.metadata = metadata
+        self._total_size = None
+        self._wasted_space = None
+
+    @property
+    def total_size(self) -> int:
+        """Calculate total size of all files in the group."""
+        if self._total_size is None:
+            self._total_size = sum(int(self.metadata[f['id']].get('size', 0)) for f in self.files)
+        return self._total_size
+
+    @property
+    def wasted_space(self) -> int:
+        """Calculate wasted space (size of redundant copies)."""
+        if self._wasted_space is None:
+            self._wasted_space = int(self.files[0].get('size', 0)) * (len(self.files) - 1)
+        return self._wasted_space
+
+    def get_parent_folders(self) -> Set[str]:
+        """Get set of parent folder IDs for all files in the group."""
+        folders = set()
+        for file in self.files:
+            file_meta = self.metadata.get(file['id'])
+            if file_meta:
+                folders.update(file_meta.get('parents', []))
+        return folders
+
+    def print_info(self) -> None:
+        """Print information about the duplicate group."""
+        example_file = self.files[0]
+        file_size = get_human_readable_size(int(example_file.get('size', 0)))
+        print(f"\nFound duplicate group ({len(self.files)} files):")
+        
+        for file in self.files:
+            file_meta = self.metadata.get(file['id'])
+            if not file_meta:
+                continue
+                
+            print(f"  - {file_meta['name']} (Size: {file_size})")
+            print(f"    ID: {file_meta['id']}")
+            print(f"    Parent: {', '.join(file_meta.get('parents', ['No parent']))}")
+
+class DuplicateFolder:
+    """Represents a folder containing duplicate files."""
+    
+    def __init__(self, folder_id: str, folder_meta: dict, duplicate_files: Set[str]):
+        self.id = folder_id
+        self.name = folder_meta.get('name', 'Unknown')
+        self.duplicate_files = duplicate_files
+        self._total_size = None
+        self._is_duplicate_only = None
+
+    @property
+    def total_size(self) -> int:
+        """Calculate total size of duplicate files in the folder."""
+        if self._total_size is None:
+            self._total_size = sum(int(meta.get('size', 0)) for meta in self.file_metadata.values())
+        return self._total_size
+
+    def update_metadata(self, file_metadata: Dict[str, dict]) -> None:
+        """Update file metadata for size calculations."""
+        self.file_metadata = file_metadata
+        self._total_size = None  # Reset cached total size
+
+    def check_if_duplicate_only(self, all_folder_files: Set[str]) -> bool:
+        """Check if folder contains only files that are duplicated elsewhere.
+        
+        Args:
+            all_folder_files: Set of file IDs in the folder
+            
+        Returns:
+            True if every file in the folder has a duplicate in another location.
+            False if any file in the folder has no duplicates elsewhere.
+            
+        Example:
+            If file1 has a duplicate in another folder:
+            - {file1} -> True (has duplicate elsewhere)
+            - {file1, file2} -> True (if both have duplicates elsewhere)
+            - {file3} -> False (no duplicates elsewhere)
+        """
+        # A folder is duplicate-only if every file in it has a duplicate elsewhere
+        return all(
+            file_id in self.duplicate_files
+            for file_id in all_folder_files
+        )
+
+    def print_info(self) -> None:
+        """Print folder information."""
+        print(f"\n{self.name}:")
+        print(f"  - {len(self.duplicate_files)} duplicate files")
+        print(f"  - Total size: {get_human_readable_size(self.total_size)}")
+        print(f"  - Folder ID: {self.id}")
+
+class DuplicateScanner:
+    """Main class for scanning and managing duplicate files."""
+    
+    def __init__(self, drive_api: DriveAPI):
+        self.drive_api = drive_api
+        self.duplicate_groups: List[DuplicateGroup] = []
+        self.duplicate_folders: Dict[str, DuplicateFolder] = {}
+
+    def scan(self, delete: bool = False, force_refresh: bool = False) -> List[DuplicateGroup]:
+        """Scan for duplicate files and organize results."""
+        # Get and validate files
+        all_files = self.drive_api.list_files(force_refresh=force_refresh)
+        valid_files = self._filter_valid_files(all_files)
+        
+        # Find duplicates
+        self._find_duplicates(valid_files)
+        
+        # Process results
+        if self.duplicate_groups:
+            self._process_results(delete)
+        
+        return self.duplicate_groups
+
+    def _filter_valid_files(self, files: List[Dict]) -> List[Dict]:
+        """Filter files that have valid MD5 checksums and non-zero size."""
+        return [
+            f for f in files 
+            if 'md5Checksum' in f and f.get('size', '0') != '0'
+        ]
+
+    def _find_duplicates(self, valid_files: List[Dict]) -> None:
+        """Find duplicate files using size and MD5 grouping."""
+        # Group by size first
+        files_by_size = self._group_files_by_size(valid_files)
+        
+        # Find duplicates within each size group
+        for size, size_files in files_by_size.items():
+            if len(size_files) > 1:
+                self._process_size_group(size_files)
+
+    def _group_files_by_size(self, files: List[Dict]) -> Dict[str, List[Dict]]:
+        """Group files by their size."""
+        files_by_size = defaultdict(list)
+        for file in files:
+            size = file.get('size', '0')
+            if size != '0':  # Skip zero-size files
+                files_by_size[size].append(file)
+        return files_by_size
+
+    def _process_size_group(self, size_files: List[Dict]) -> None:
+        """Process a group of files with the same size."""
+        # Group by MD5
+        files_by_md5 = self._group_files_by_md5(size_files)
+        
+        # Process each group of duplicates
+        for md5, files in files_by_md5.items():
+            if len(files) > 1:
+                self._process_duplicate_group(files)
+
+    def _group_files_by_md5(self, files: List[Dict]) -> Dict[str, List[Dict]]:
+        """Group files by their MD5 checksum."""
+        files_by_md5 = defaultdict(list)
+        for file in files:
+            if 'md5Checksum' in file:  # Skip files without MD5
+                files_by_md5[file['md5Checksum']].append(file)
+        return files_by_md5
+
+    def _process_duplicate_group(self, files: List[Dict]) -> None:
+        """Process a group of duplicate files."""
+        # Get metadata for all files in this group
+        file_ids = [f['id'] for f in files]
+        metadata = self.drive_api.get_files_metadata_batch(file_ids)
+        
+        # Create duplicate group
+        group = DuplicateGroup(files, metadata)
+        self.duplicate_groups.append(group)
+        
+        # Print group info
+        group.print_info()
+        
+        # Update folder tracking
+        self._update_folder_tracking(group)
+
+    def _update_folder_tracking(self, group: DuplicateGroup) -> None:
+        """Update folder tracking with files from a duplicate group."""
+        for file in group.files:
+            file_meta = group.metadata.get(file['id'])
+            if file_meta:
+                for parent in file_meta.get('parents', []):
+                    if parent not in self.duplicate_folders:
+                        folder_meta = self.drive_api.get_file_metadata(parent)
+                        if folder_meta:
+                            self.duplicate_folders[parent] = DuplicateFolder(
+                                parent, folder_meta, set()
+                            )
+                    if parent in self.duplicate_folders:
+                        self.duplicate_folders[parent].duplicate_files.add(file['id'])
+
+    def _process_results(self, delete: bool) -> None:
+        """Process and display results."""
+        # Calculate statistics
+        total_duplicates = sum(len(group.files) for group in self.duplicate_groups)
+        total_wasted = sum(group.wasted_space for group in self.duplicate_groups)
+        
+        # Print summary
+        self._print_summary(total_duplicates, total_wasted)
+        
+        # Process folders
+        if self.duplicate_folders:
+            self._process_folders()
+        
+        # Handle deletion if requested
+        if delete:
+            self._handle_deletions()
+
+    def _print_summary(self, total_duplicates: int, total_wasted: int) -> None:
+        """Print summary of duplicate files found."""
+        print("\nDuplicate Files Summary:")
+        print(f"Total files scanned: {len(self.duplicate_groups)}")
+        print(f"Duplicate groups found: {len(self.duplicate_groups)}")
+        print(f"Total duplicate files: {total_duplicates}")
+        print(f"Wasted space: {get_human_readable_size(total_wasted)}")
+        print(f"Folders containing duplicates: {len(self.duplicate_folders)}")
+
+    def _process_folders(self) -> None:
+        """Process and display folder information."""
+        # Get all folder metadata
+        folder_ids = list(self.duplicate_folders.keys())
+        folder_metadata = self.drive_api.get_files_metadata_batch(folder_ids)
+        
+        # Update folder metadata
+        for folder_id, folder in self.duplicate_folders.items():
+            if folder_id in folder_metadata:
+                folder.update_metadata(folder_metadata)
+        
+        # Print folder summary
+        print("\nFolders containing duplicates:")
+        print("==============================")
+        for folder in sorted(self.duplicate_folders.values(), 
+                           key=lambda f: f.total_size, reverse=True):
+            folder.print_info()
+        
+        # Find and print duplicate-only folders
+        self._print_duplicate_only_folders()
+
+    def _print_duplicate_only_folders(self) -> None:
+        """Find and print folders that only contain duplicates."""
+        # Get all files in these folders
+        all_files = self.drive_api.list_files(force_refresh=True)
+        folder_files = defaultdict(set)
+        for file in all_files:
+            for parent in file.get('parents', []):
+                if parent in self.duplicate_folders:
+                    folder_files[parent].add(file['id'])
+        
+        # Find duplicate-only folders
+        duplicate_only = [
+            folder for folder in self.duplicate_folders.values()
+            if folder.check_if_duplicate_only(folder_files.get(folder.id, set()))
+        ]
+        
+        if duplicate_only:
+            print("\nFolders containing only duplicates:")
+            print("================================")
+            for folder in sorted(duplicate_only, key=lambda f: f.total_size, reverse=True):
+                folder.print_info()
+
+    def _handle_deletions(self) -> None:
+        """Handle deletion of duplicate files."""
+        for group in self.duplicate_groups:
+            _handle_group_deletion(self.drive_api, group.files, group.metadata)
 
 def handle_duplicate(drive_api: DriveAPI, file1: dict, file2: dict, duplicate_folders: Dict[str, Set[str]], delete: bool = False) -> None:
     """Handle a duplicate file pair with batched metadata fetching."""
@@ -758,93 +1066,22 @@ def _get_duplicate_only_folders(drive_api: DriveAPI, duplicate_folders: Dict[str
 
 def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bool = False) -> List[List[Dict]]:
     """Find duplicate files in Google Drive with batched operations."""
-    # Get all files
-    all_files = drive_api.list_files(force_refresh=force_refresh)
-    total_files = len(all_files)
-    logging.info(f"Found {total_files} total files")
-
-    # Pre-filter files that have MD5 checksums and size > 0
-    valid_files = _filter_valid_files(all_files)
-    logging.info(f"Found {len(valid_files)} files with valid checksums")
-
-    # Group files by size first to reduce MD5 comparison space
-    files_by_size = _group_files_by_size(valid_files)
-
-    # Find duplicate groups
-    duplicate_groups = []
-    duplicate_folders = defaultdict(set)
+    scanner = DuplicateScanner(drive_api)
+    duplicate_groups = scanner.scan(delete, force_refresh)
     
-    # Process files of the same size
-    for size, size_files in files_by_size.items():
-        if len(size_files) > 1:
-            # Group by MD5
-            files_by_md5 = _group_files_by_md5(size_files)
-            
-            # Process each group of duplicates
-            for md5, files in files_by_md5.items():
-                if len(files) > 1:
-                    duplicate_groups.append(files)
-                    
-                    # Get metadata for all files in this group at once
-                    file_ids = [f['id'] for f in files]
-                    metadata = drive_api.get_files_metadata_batch(file_ids)
-                    
-                    # Print group info
-                    _print_duplicate_group(files, metadata)
-                    
-                    # Update folder tracking
-                    for file in files:
-                        file_meta = metadata.get(file['id'])
-                        if file_meta:
-                            for parent in file_meta.get('parents', []):
-                                duplicate_folders[parent].add(file_meta['id'])
-                    
-                    # Handle deletion if requested
-                    if delete:
-                        _handle_group_deletion(drive_api, files, metadata)
-
-    # Print summary
-    total_duplicates = sum(len(group) for group in duplicate_groups)
-    total_size = sum(
-        int(group[0].get('size', 0)) * (len(group) - 1)  # Count only redundant copies
-        for group in duplicate_groups
-    )
-    
-    print("\nDuplicate Files Summary:")
-    print(f"Total files scanned: {total_files}")
-    print(f"Duplicate groups found: {len(duplicate_groups)}")
-    print(f"Total duplicate files: {total_duplicates}")
-    print(f"Wasted space: {get_human_readable_size(total_size)}")
-    print(f"Folders containing duplicates: {len(duplicate_folders)}")
-
-    # Print folder summary if there are duplicates
-    if duplicate_folders:
-        _print_duplicate_folders_summary(drive_api, duplicate_folders)
-        
-        # Print folders that only contain duplicates
-        duplicate_only_folders = _get_duplicate_only_folders(drive_api, duplicate_folders)
-        if duplicate_only_folders:
-            print("\nFolders containing only duplicates:")
-            print("================================")
-            for folder in duplicate_only_folders:
-                print(f"\n{folder['name']}:")
-                print(f"  - {folder['count']} duplicate files")
-                print(f"  - Total size: {get_human_readable_size(folder['total_size'])}")
-                print(f"  - Folder ID: {folder['id']}")
-
     # Write duplicates to CSV if any were found
     if duplicate_groups:
         duplicate_pairs = []
         for group in duplicate_groups:
             # Create pairs of files from each group
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    duplicate_pairs.append((group[i], group[j]))
+            for i in range(len(group.files)):
+                for j in range(i + 1, len(group.files)):
+                    duplicate_pairs.append((group.files[i], group.files[j]))
         
         csv_file = write_to_csv(duplicate_pairs, drive_api)
         print(f"\nDuplicate pairs have been written to: {csv_file}")
-
-    return duplicate_groups
+    
+    return [group.files for group in duplicate_groups]
 
 def _handle_group_deletion(drive_api: DriveAPI, files: List[dict], metadata: Dict[str, dict]):
     """Handle deletion for a group of duplicate files."""

@@ -119,17 +119,22 @@ pip install -r requirements.txt
 
 2. Run all tests:
 ```bash
-python -m unittest tests/test_duplicate_scanner.py
+pytest tests/
 ```
 
 3. Run a specific test:
 ```bash
-python -m unittest tests.test_duplicate_scanner.TestDuplicateScanner.test_name
+pytest tests/test_duplicate_scanner.py::TestDuplicateScanner::test_name
 ```
 
 4. Run tests with verbose output:
 ```bash
-python -m unittest -v tests/test_duplicate_scanner.py
+pytest -v tests/
+```
+
+5. Run tests with coverage report:
+```bash
+pytest --cov=. tests/
 ```
 
 The test suite includes tests for:
