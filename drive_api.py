@@ -112,6 +112,8 @@ class DriveAPI:
                                 results[file_id] = single_result
                         except Exception as e:
                             logging.error(f"Failed to get metadata for file {file_id}: {e}")
+                            # Remove failed result if it was added
+                            results.pop(file_id, None)
             except Exception as e:
                 logging.error(f"Batch execution failed: {e}")
                 # Try to get files individually after batch failure
@@ -122,6 +124,8 @@ class DriveAPI:
                             results[file_id] = single_result
                     except Exception as inner_e:
                         logging.error(f"Failed to get metadata for file {file_id}: {inner_e}")
+                        # Remove failed result if it was added
+                        results.pop(file_id, None)
 
         return results
 

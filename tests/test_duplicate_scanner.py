@@ -383,6 +383,155 @@ class TestDuplicateScanner(unittest.TestCase):
             self.assertEqual(len(groups), 1)  # One group of duplicates
             self.assertEqual(len(groups[0].files), 2)  # Two files in the group
 
+    def test_batch_handler_operations(self):
+        """Test BatchHandler operations and contract."""
+        # Setup
+        mock_service = MagicMock()
+        mock_batch = MagicMock()
+        mock_service.new_batch_http_request.return_value = mock_batch
+        handler = BatchHandler(mock_service, self.test_cache)
+        
+        # Test adding requests
+        file_ids = ['id1', 'id2', 'id3']
+        for file_id in file_ids:
+            handler.add_metadata_request(file_id)
+        
+        # Verify batch execution
+        mock_batch.execute.return_value = None
+        handler.execute()
+        mock_batch.execute.assert_called_once()
+        
+        # Test callback behavior
+        for file_id in file_ids[:2]:  # First two succeed
+            callback = mock_batch.add.call_args_list[file_ids.index(file_id)][1]['callback']
+            callback(file_id, {'id': file_id, 'name': f'file{file_id}.txt'}, None)
+        
+        # Test error callback
+        error_callback = mock_batch.add.call_args_list[2][1]['callback']
+        error_callback('id3', None, Exception("API Error"))
+        
+        # Verify results
+        results = handler.get_results()
+        self.assertEqual(len(results), 2)
+        self.assertTrue('id1' in results)
+        self.assertTrue('id2' in results)
+        self.assertFalse('id3' in results)
+        
+        # Verify failed requests
+        failed = handler.get_failed_requests()
+        self.assertEqual(len(failed), 1)
+        self.assertTrue('id3' in failed)
+
+    def test_batch_handler_retry(self):
+        """Test BatchHandler retry behavior."""
+        # Setup
+        mock_service = MagicMock()
+        mock_batch = MagicMock()
+        mock_service.new_batch_http_request.return_value = mock_batch
+        handler = BatchHandler(mock_service, self.test_cache)
+        
+        # Add a request
+        handler.add_metadata_request('test_id')
+        
+        # Mock batch execution to fail twice then succeed
+        mock_batch.execute.side_effect = [
+            Exception("First failure"),
+            Exception("Second failure"),
+            None
+        ]
+        
+        # Execute batch and verify retries
+        handler.execute()
+        self.assertEqual(mock_batch.execute.call_count, 3)
+
+    def test_batch_handler_cache_interaction(self):
+        """Test BatchHandler cache interaction."""
+        # Setup
+        mock_service = MagicMock()
+        mock_batch = MagicMock()
+        mock_service.new_batch_http_request.return_value = mock_batch
+        handler = BatchHandler(mock_service, self.test_cache)
+        
+        # Test metadata request with cache
+        file_id = 'test_id'
+        handler.add_metadata_request(file_id)
+        
+        # Simulate successful response
+        callback = mock_batch.add.call_args[1]['callback']
+        response = {'id': file_id, 'name': 'test.txt'}
+        callback(file_id, response, None)
+        
+        # Verify cache was updated
+        cached = self.test_cache.get(file_id)
+        self.assertEqual(cached, response)
+        
+        # Test trash request cache removal
+        handler.add_trash_request(file_id)
+        trash_callback = mock_batch.add.call_args[1]['callback']
+        trash_callback(file_id, {'id': file_id, 'trashed': True}, None)
+        
+        # Verify cache was cleared
+        self.assertIsNone(self.test_cache.get(file_id))
+
+    def test_drive_api_batch_operations(self):
+        """Test DriveAPI batch operations contract."""
+        # Setup
+        mock_service = MagicMock()
+        api = DriveAPI(mock_service, self.test_cache)
+        
+        # Test metadata batch
+        file_ids = ['id1', 'id2', 'id3']
+        mock_responses = {
+            'id1': {'id': 'id1', 'name': 'file1.txt'},
+            'id2': {'id': 'id2', 'name': 'file2.txt'}
+        }
+        
+        # Mock the batch handler
+        mock_handler = Mock()
+        mock_handler.results = mock_responses
+        mock_handler.get_results.return_value = mock_responses
+        mock_handler.get_failed_requests.return_value = {'id3'}
+        mock_handler.execute.return_value = None
+        
+        # Mock the get_file_metadata method to simulate individual retries
+        with patch.object(DriveAPI, '_get_batch_handler', return_value=mock_handler), \
+             patch.object(DriveAPI, 'get_file_metadata', return_value=None):
+            
+            # Test metadata batch
+            result = api.get_files_metadata_batch(file_ids)
+            self.assertEqual(result['id1'], mock_responses['id1'])
+            self.assertEqual(result['id2'], mock_responses['id2'])
+            self.assertNotIn('id3', result)
+            
+            # Reset mock responses for trash operation
+            mock_responses = {'id1': True, 'id2': True}
+            mock_handler.results = mock_responses
+            mock_handler.get_results.return_value = mock_responses
+            
+            # Test trash batch
+            trash_result = api.move_files_to_trash_batch(file_ids)
+            self.assertTrue(trash_result['id1'])
+            self.assertTrue(trash_result['id2'])
+            self.assertFalse(trash_result['id3'])
+
+    def test_drive_api_batch_size_limits(self):
+        """Test DriveAPI batch size limits."""
+        # Setup
+        mock_service = MagicMock()
+        api = DriveAPI(mock_service, self.test_cache)
+        
+        # Generate more file IDs than BATCH_SIZE
+        file_ids = [f'id{i}' for i in range(BATCH_SIZE + 5)]
+        mock_responses = {f'id{i}': {'id': f'id{i}'} for i in range(BATCH_SIZE)}
+        
+        with patch.object(BatchHandler, 'execute') as mock_execute, \
+             patch.object(BatchHandler, 'get_results', return_value=mock_responses):
+            
+            # Test metadata batch
+            api.get_files_metadata_batch(file_ids)
+            # Should be called twice: once for BATCH_SIZE items, once for remaining 5
+            self.assertEqual(mock_execute.call_count, 2)
+
 if __name__ == '__main__':
     unittest.main()
     

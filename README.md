@@ -134,8 +134,24 @@ pytest -v tests/
 
 5. Run tests with coverage report:
 ```bash
-pytest --cov=. tests/
+# Run tests with coverage collection
+python3 -m coverage run -m pytest tests/
+
+# Generate coverage report
+python3 -m coverage report --show-missing
 ```
+
+The current test coverage report shows:
+- Overall coverage: 86%
+- Key module coverage:
+  - config.py: 100%
+  - export.py: 100%
+  - batch.py: 86%
+  - drive_api.py: 86%
+  - models.py: 80%
+  - cache.py: 73%
+  - scanner.py: 62%
+  - utils.py: 92%
 
 The test suite includes tests for:
 - File metadata fetching and caching
