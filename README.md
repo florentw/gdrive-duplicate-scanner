@@ -108,6 +108,38 @@ The script provides detailed output including:
 - List of folders containing only duplicates
 - CSV export of duplicate pairs
 
+## Running Tests
+
+The project includes a comprehensive test suite to ensure reliability and correctness. To run the tests:
+
+1. Make sure you have all dependencies installed:
+```bash
+pip install -r requirements.txt
+```
+
+2. Run all tests:
+```bash
+python -m unittest tests/test_duplicate_scanner.py
+```
+
+3. Run a specific test:
+```bash
+python -m unittest tests.test_duplicate_scanner.TestDuplicateScanner.test_name
+```
+
+4. Run tests with verbose output:
+```bash
+python -m unittest -v tests/test_duplicate_scanner.py
+```
+
+The test suite includes tests for:
+- File metadata fetching and caching
+- Batch processing and retry mechanisms
+- Duplicate detection and handling
+- CSV export functionality
+- Cache operations and persistence
+- Error handling and edge cases
+
 ## Logs
 The script writes detailed logs to drive_scanner.log. Each run of the script appends to the log file.
 

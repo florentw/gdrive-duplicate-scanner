@@ -160,7 +160,19 @@ class TestDuplicateScanner(unittest.TestCase):
         # Mock batch handler
         with patch('duplicate_scanner.BatchHandler') as mock_handler:
             mock_instance = mock_handler.return_value
-            mock_instance.results = mock_responses
+            
+            def mock_add_metadata_request(file_id):
+                mock_instance.results[file_id] = mock_responses[file_id]
+            
+            def mock_execute():
+                # Simulate successful batch execution
+                pass
+            
+            mock_instance.results = {}
+            mock_instance._cached_results = {}
+            mock_instance.add_metadata_request.side_effect = mock_add_metadata_request
+            mock_instance.execute.side_effect = mock_execute
+            mock_instance.get_results.return_value = mock_responses
             
             result = self.drive_api.get_files_metadata_batch(['id1', 'id2'])
             
@@ -558,16 +570,30 @@ class TestDuplicateScanner(unittest.TestCase):
         """Test batch size limits in metadata fetching."""
         # Create more files than BATCH_SIZE
         file_ids = [f'id{i}' for i in range(BATCH_SIZE + 10)]
+        mock_responses = {f'id{i}': {'id': f'id{i}'} for i in range(len(file_ids))}
         
         with patch('duplicate_scanner.BatchHandler') as mock_handler:
             mock_instance = mock_handler.return_value
-            mock_instance.results = {f'id{i}': {'id': f'id{i}'} for i in range(len(file_ids))}
+            
+            def mock_add_metadata_request(file_id):
+                mock_instance.results[file_id] = mock_responses[file_id]
+            
+            def mock_execute():
+                # Simulate successful batch execution
+                pass
+            
+            mock_instance.results = {}
+            mock_instance._cached_results = {}
+            mock_instance.add_metadata_request.side_effect = mock_add_metadata_request
+            mock_instance.execute.side_effect = mock_execute
+            mock_instance.get_results.return_value = mock_responses
             
             result = self.drive_api.get_files_metadata_batch(file_ids)
             
             # Should execute multiple batches
             self.assertGreater(mock_instance.execute.call_count, 1)
             self.assertEqual(len(result), len(file_ids))
+            self.assertEqual(result, mock_responses)
 
     def test_find_duplicates_grouping(self):
         """Test duplicate file grouping logic."""

@@ -286,13 +286,14 @@ class BatchHandler:
         self._updates = {}
         self._removals = []
         self._failed_requests = set()
+        self._cached_results = {}  # Track cached results separately
 
     def add_metadata_request(self, file_id: str) -> None:
         """Add metadata fetch request to batch."""
         # Check cache first
         cached = self.cache.get(file_id)
         if cached:
-            self.results[file_id] = cached
+            self._cached_results[file_id] = cached
             return  # Don't count cached files in batch size
 
         if self.count >= BATCH_SIZE:
@@ -341,9 +342,8 @@ class BatchHandler:
         try:
             self.batch.execute()
             # Update cache with successful results
-            for file_id, metadata in self._updates.items():
-                if metadata:
-                    self.cache.set(file_id, metadata)
+            if self._updates:
+                self.cache.update(self._updates)
             # Remove trashed files from cache
             if self._removals:
                 self.cache.remove(self._removals)
@@ -361,6 +361,12 @@ class BatchHandler:
             self._updates = {}
             self._removals = []
 
+    def get_results(self) -> Dict[str, Any]:
+        """Get combined results from both cache and API calls."""
+        results = self.results.copy()
+        results.update(self._cached_results)
+        return results
+
     def get_failed_requests(self) -> Set[str]:
         """Get set of file IDs that failed to process."""
         return self._failed_requests
@@ -371,6 +377,7 @@ class DriveAPI:
     def __init__(self, service: Resource, cache: Optional[MetadataCache] = None):
         self.service = service
         self.cache = cache or MetadataCache()  # Use provided cache or create new one
+        self._file_cache = {}  # In-memory cache for file list
 
     def list_files(self, force_refresh: bool = False) -> List[Dict]:
         """List all files in Drive with caching."""
@@ -463,7 +470,7 @@ class DriveAPI:
             try:
                 # Execute the batch
                 handler.execute()
-                results.update(handler.results)
+                results.update(handler.get_results())
             except Exception as e:
                 logging.error(f"Batch execution failed: {e}")
                 # Mark all pending requests as failed
@@ -645,14 +652,17 @@ def _group_files_by_size(files: List[Dict]) -> Dict[str, List[Dict]]:
     """Group files by their size."""
     files_by_size = defaultdict(list)
     for file in files:
-        files_by_size[file['size']].append(file)
+        size = file.get('size', '0')
+        if size != '0':  # Skip zero-size files
+            files_by_size[size].append(file)
     return files_by_size
 
 def _group_files_by_md5(files: List[Dict]) -> Dict[str, List[Dict]]:
     """Group files by their MD5 checksum."""
     files_by_md5 = defaultdict(list)
     for file in files:
-        files_by_md5[file['md5Checksum']].append(file)
+        if 'md5Checksum' in file:  # Skip files without MD5
+            files_by_md5[file['md5Checksum']].append(file)
     return files_by_md5
 
 def _print_duplicate_group(files: List[Dict], metadata: Dict[str, dict]) -> None:
