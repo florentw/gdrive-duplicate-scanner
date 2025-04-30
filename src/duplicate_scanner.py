@@ -18,17 +18,6 @@ from typing import List, Dict, Set, Optional, Any, Callable
 from googleapiclient.discovery import Resource
 import time
 
-# Configure logging to write logs to a file and the console
-log_format = '%(asctime)s - %(levelname)s - %(message)s'
-logging.basicConfig(filename='drive_scanner.log', level=logging.INFO, format=log_format)
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter(log_format))
-logging.getLogger().addHandler(console_handler)
-
-# If modifying these SCOPES, delete the file token.pickle.
-SCOPES = ['https://www.googleapis.com/auth/drive']
-
 # Add CSV headers as a constant
 CSV_HEADERS = [
     'File Name',
@@ -906,7 +895,7 @@ def generate_csv_filename():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     return f'drive_duplicates_{timestamp}.csv'
 
-def write_to_csv(duplicate_pairs, drive_api: DriveAPI):
+def write_to_csv(duplicate_groups, drive_api: DriveAPI):
     """Write duplicate file information to CSV with minimal API calls."""
     csv_filename = generate_csv_filename()
     duplicate_group_id = 1
@@ -915,35 +904,26 @@ def write_to_csv(duplicate_pairs, drive_api: DriveAPI):
         writer = csv.DictWriter(csvfile, fieldnames=CSV_HEADERS)
         writer.writeheader()
         
-        for file1, file2 in duplicate_pairs:
-            # Get complete metadata for both files
-            file1_meta = drive_api.get_file_metadata(file1['id'])
-            file2_meta = drive_api.get_file_metadata(file2['id'])
-            
-            if not file1_meta or not file2_meta:
-                continue
+        for group in duplicate_groups:
+            for file in group.files:
+                file_meta = group.metadata.get(file['id'])
+                if file_meta:
+                    def prepare_file_row(file_meta):
+                        parent_id = file_meta.get('parents', [''])[0]
+                        return {
+                            'File Name': file_meta['name'],
+                            'Full Path': f"{parent_id}/{file_meta['name']}",
+                            'Size (Bytes)': file_meta.get('size', '0'),
+                            'Size (Human Readable)': get_human_readable_size(int(file_meta.get('size', 0))),
+                            'File ID': file_meta['id'],
+                            'MD5 Checksum': file_meta.get('md5Checksum', ''),
+                            'Duplicate Group ID': duplicate_group_id,
+                            'Parent Folder': parent_id,
+                            'Parent Folder ID': parent_id
+                        }
 
-            def prepare_file_row(file_meta, duplicate_meta):
-                parent_id = file_meta.get('parents', [''])[0]
-                return {
-                    'File Name': file_meta['name'],
-                    'Full Path': f"{parent_id}/{file_meta['name']}",
-                    'Size (Bytes)': file_meta.get('size', '0'),
-                    'Size (Human Readable)': get_human_readable_size(int(file_meta.get('size', 0))),
-                    'File ID': file_meta['id'],
-                    'MD5 Checksum': file_meta.get('md5Checksum', ''),
-                    'Duplicate Group ID': duplicate_group_id,
-                    'Parent Folder': parent_id,
-                    'Parent Folder ID': parent_id,
-                    'Duplicate File Name': duplicate_meta['name'],
-                    'Duplicate File Path': f"{duplicate_meta.get('parents', [''])[0]}/{duplicate_meta['name']}",
-                    'Duplicate File Size': get_human_readable_size(int(duplicate_meta.get('size', 0))),
-                    'Duplicate File ID': duplicate_meta['id']
-                }
-
-            # Write both files to CSV
-            writer.writerow(prepare_file_row(file1_meta, file2_meta))
-            writer.writerow(prepare_file_row(file2_meta, file1_meta))
+                    # Write file to CSV
+                    writer.writerow(prepare_file_row(file_meta))
             duplicate_group_id += 1
 
     logging.info(f"CSV export completed: {csv_filename}")
@@ -1078,7 +1058,7 @@ def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bo
                 for j in range(i + 1, len(group.files)):
                     duplicate_pairs.append((group.files[i], group.files[j]))
         
-        csv_file = write_to_csv(duplicate_pairs, drive_api)
+        csv_file = write_to_csv(duplicate_groups, drive_api)
         print(f"\nDuplicate pairs have been written to: {csv_file}")
     
     return [group.files for group in duplicate_groups]
@@ -1112,14 +1092,18 @@ def _handle_group_deletion(drive_api: DriveAPI, files: List[dict], metadata: Dic
         print("Invalid choice. Please enter a valid number or 's' to skip.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Find duplicate files in Google Drive")
-    parser.add_argument('--delete', action='store_true', help='Move duplicate files to trash')
-    parser.add_argument('--refresh-cache', action='store_true', help='Force refresh of cache')
-    args = parser.parse_args()
+    """Main function to run the duplicate scanner."""
+    drive_api = DriveAPI(get_service())
+    scanner = DuplicateScanner(drive_api)
+    duplicate_groups = scanner.scan()
     
-    service = get_service()
-    drive_api = DriveAPI(service)
-    find_duplicates(drive_api, delete=args.delete, force_refresh=args.refresh_cache)
+    # Print summary
+    total_duplicates = sum(len(group.files) - 1 for group in duplicate_groups)
+    total_wasted = sum(group.wasted_space for group in duplicate_groups)
+    scanner._print_summary(total_duplicates, total_wasted)
+    
+    # Export to CSV
+    write_to_csv(duplicate_groups, drive_api)
 
 if __name__ == '__main__':
     main()

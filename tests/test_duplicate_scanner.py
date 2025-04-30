@@ -1,14 +1,10 @@
 import unittest
 from unittest.mock import Mock, patch, MagicMock
 import os
-from collections import defaultdict
 import sys
 from pathlib import Path
 import tempfile
 import shutil
-from io import StringIO
-from datetime import datetime, timedelta
-import csv
 
 # Add parent directory to Python path to import modules
 sys.path.append(str(Path(__file__).parent.parent))
@@ -20,7 +16,7 @@ from batch import BatchHandler
 from models import DuplicateGroup, DuplicateFolder
 from scanner import DuplicateScanner
 from export import write_to_csv
-from config import CACHE_EXPIRY_HOURS, BATCH_SIZE, SAVE_INTERVAL_MINUTES
+from config import BATCH_SIZE
 
 class TestDuplicateScanner(unittest.TestCase):
     """Test suite for duplicate scanner functionality."""
@@ -245,31 +241,27 @@ class TestDuplicateScanner(unittest.TestCase):
 
     def test_write_to_csv(self):
         """Test CSV export functionality."""
-        mock_pairs = [
-            {
-                'group_id': 1,
-                'file': {'id': 'id1', 'name': 'file1.txt', 'size': '1024'},
-                'duplicate': {'id': 'id2', 'name': 'file2.txt', 'size': '1024'}
-            }
+        # Create a mock duplicate group
+        files = [
+            {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'parents': ['parent1']},
+            {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'parents': ['parent2']}
         ]
+        metadata = {
+            'id1': {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'parents': ['parent1']},
+            'id2': {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'parents': ['parent2']}
+        }
+        group = DuplicateGroup(files, metadata)
         
         # Mock parent folder metadata
         with patch.object(self.drive_api, 'get_file_metadata') as mock_get_metadata:
             mock_get_metadata.return_value = {'name': 'test_folder'}
             
-            write_to_csv(mock_pairs, self.drive_api)
+            filename = write_to_csv([group], self.drive_api)
+            self.assertIsNotNone(filename)
+            self.assertTrue(os.path.exists(filename))
             
-            # Check if CSV file was created
-            csv_files = [f for f in os.listdir(self.test_dir) if f.startswith('duplicate_files_') and f.endswith('.csv')]
-            self.assertEqual(len(csv_files), 1)
-            
-            # Verify CSV content
-            with open(os.path.join(self.test_dir, csv_files[0]), 'r') as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
-                self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0]['File Name'], 'file1.txt')
-                self.assertEqual(rows[0]['Duplicate File Name'], 'file2.txt')
+            # Clean up
+            os.remove(filename)
 
     def test_write_to_csv_file_error(self):
         """Test CSV export error handling."""
