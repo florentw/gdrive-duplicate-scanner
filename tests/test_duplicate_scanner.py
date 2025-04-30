@@ -22,6 +22,8 @@ from duplicate_scanner import (
 )
 
 class TestDuplicateScanner(unittest.TestCase):
+    """Test suite for duplicate scanner functionality."""
+
     def setUp(self):
         """Set up test fixtures before each test method."""
         self.mock_service = Mock()
@@ -102,7 +104,7 @@ class TestDuplicateScanner(unittest.TestCase):
         # Test cache load with invalid file
         with patch('builtins.open', side_effect=IOError("File error")):
             cache = MetadataCache(self.test_cache_file)
-            self.assertEqual(cache.get('any_key'), None)
+            self.assertIsNone(cache.get('any_key'))
 
         # Test cache save with invalid file
         self.test_cache.set('test_key', 'test_value')
