@@ -79,7 +79,7 @@ class MetadataCache:
 
     def _cleanup_expired(self) -> None:
         """Remove expired entries from cache."""
-        if datetime.now() - self._last_cleanup < timedelta(hours=1):
+        if datetime.now() - self._last_cleanup < timedelta(hours=CACHE_EXPIRY_HOURS):
             return
 
         expired_keys = []
@@ -378,7 +378,7 @@ class BatchHandler:
             self._removals.clear()
 
 class DriveAPI:
-    """Simplified Google Drive API wrapper with caching."""
+    """Simplified Google Drive API wrapper with caching and batching."""
     
     def __init__(self, service: Resource, cache: Optional[MetadataCache] = None):
         self.service = service
@@ -423,113 +423,109 @@ class DriveAPI:
                 logging.info(f"Using cached data as fallback ({len(cached)} files)")
                 return cached
             raise
-    
-    def batch_operation(self) -> BatchHandler:
-        """Create a new batch operation."""
-        return BatchHandler(self.service, self.cache)
 
-def get_file_metadata(drive_api: DriveAPI, file_id: str) -> Optional[dict]:
-    """Get file metadata with caching."""
-    if not file_id:
-        return None
+    def get_file_metadata(self, file_id: str) -> Optional[dict]:
+        """Get file metadata with caching."""
+        if not file_id:
+            return None
 
-    # Check cache first
-    cached_metadata = drive_api.cache.get(file_id)
-    if cached_metadata is not None:
-        return cached_metadata
+        # Check cache first
+        cached_metadata = self.cache.get(file_id)
+        if cached_metadata is not None:
+            return cached_metadata
 
-    try:
-        metadata = drive_api.service.files().get(
-            fileId=file_id,
-            fields=METADATA_FIELDS
-        ).execute()
-        drive_api.cache.set(file_id, metadata)
-        return metadata
-    except Exception as e:
-        logging.error(f"Error getting file metadata for {file_id}: {e}")
-        return None
+        try:
+            metadata = self.service.files().get(
+                fileId=file_id,
+                fields=METADATA_FIELDS
+            ).execute()
+            self.cache.set(file_id, metadata)
+            return metadata
+        except Exception as e:
+            logging.error(f"Error getting file metadata for {file_id}: {e}")
+            return None
 
-def get_files_metadata_batch(drive_api: DriveAPI, file_ids: list[str]) -> Dict[str, dict]:
-    """Get metadata for multiple files in batches with retry logic."""
-    results = {}
-    failed_ids = set()
-    
-    # Process files in smaller batches
-    for i in range(0, len(file_ids), BATCH_SIZE):
-        batch_ids = file_ids[i:i + BATCH_SIZE]
-        logging.info(f"Processing batch {i//BATCH_SIZE + 1} of {(len(file_ids) + BATCH_SIZE - 1)//BATCH_SIZE}")
+    def get_files_metadata_batch(self, file_ids: list[str]) -> Dict[str, dict]:
+        """Get metadata for multiple files in batches with retry logic."""
+        results = {}
+        failed_ids = set()
         
-        try:
-            handler = BatchHandler(drive_api.service, drive_api.cache)
-            for file_id in batch_ids:
-                handler.add_metadata_request(file_id)
+        # Process files in smaller batches
+        for i in range(0, len(file_ids), BATCH_SIZE):
+            batch_ids = file_ids[i:i + BATCH_SIZE]
+            logging.info(f"Processing batch {i//BATCH_SIZE + 1} of {(len(file_ids) + BATCH_SIZE - 1)//BATCH_SIZE}")
             
-            # Execute the batch
-            handler.execute()
-            
-            # Check for failed requests
-            for file_id in batch_ids:
-                if file_id not in handler.results or handler.results[file_id] is None:
-                    failed_ids.add(file_id)
-                else:
-                    results[file_id] = handler.results[file_id]
-        except Exception as e:
-            logging.error(f"Batch processing failed: {e}")
-            failed_ids.update(batch_ids)
-    
-    # Retry failed requests individually with exponential backoff
-    if failed_ids:
-        logging.info(f"Retrying {len(failed_ids)} failed requests")
-        for file_id in failed_ids:
-            retries = 0
-            while retries < MAX_RETRIES:
-                try:
-                    metadata = drive_api.service.files().get(
-                        fileId=file_id,
-                        fields='*'
-                    ).execute()
-                    results[file_id] = metadata
-                    break
-                except Exception as e:
-                    retries += 1
-                    if retries == MAX_RETRIES:
-                        logging.error(f"Failed to fetch metadata for {file_id} after {MAX_RETRIES} retries: {e}")
+            try:
+                handler = BatchHandler(self.service, self.cache)
+                for file_id in batch_ids:
+                    handler.add_metadata_request(file_id)
+                
+                # Execute the batch
+                handler.execute()
+                
+                # Check for failed requests
+                for file_id in batch_ids:
+                    if file_id not in handler.results or handler.results[file_id] is None:
+                        failed_ids.add(file_id)
                     else:
-                        # Exponential backoff
-                        delay = RETRY_DELAY * (2 ** (retries - 1))
-                        logging.warning(f"Retry {retries} for {file_id}, waiting {delay}s")
-                        time.sleep(delay)
-    
-    return results
+                        results[file_id] = handler.results[file_id]
+            except Exception as e:
+                logging.error(f"Batch processing failed: {e}")
+                failed_ids.update(batch_ids)
+        
+        # Retry failed requests individually with exponential backoff
+        if failed_ids:
+            logging.info(f"Retrying {len(failed_ids)} failed requests")
+            for file_id in failed_ids:
+                retries = 0
+                while retries < MAX_RETRIES:
+                    try:
+                        metadata = self.service.files().get(
+                            fileId=file_id,
+                            fields='*'
+                        ).execute()
+                        results[file_id] = metadata
+                        break
+                    except Exception as e:
+                        retries += 1
+                        if retries == MAX_RETRIES:
+                            logging.error(f"Failed to fetch metadata for {file_id} after {MAX_RETRIES} retries: {e}")
+                        else:
+                            # Exponential backoff
+                            delay = RETRY_DELAY * (2 ** (retries - 1))
+                            logging.warning(f"Retry {retries} for {file_id}, waiting {delay}s")
+                            time.sleep(delay)
+        
+        return results
 
-def move_files_to_trash_batch(drive_api: DriveAPI, file_ids: list[str]) -> Dict[str, bool]:
-    """Move multiple files to trash in batches."""
-    results = {}
-    
-    # Process files in smaller batches
-    for i in range(0, len(file_ids), BATCH_SIZE):
-        batch_ids = file_ids[i:i + BATCH_SIZE]
-        try:
-            handler = BatchHandler(drive_api.service, drive_api.cache)
-            
-            for file_id in batch_ids:
-                handler.add_trash_request(file_id)
-            
-            # Execute the batch
-            handler.execute()
-            results.update(handler.results)
-        except Exception as e:
-            logging.error(f"Batch trash operation failed: {e}")
-            # Mark all files in this batch as failed
-            for file_id in batch_ids:
-                results[file_id] = False
-    
-    return results
+    def move_files_to_trash_batch(self, file_ids: list[str]) -> Dict[str, bool]:
+        """Move multiple files to trash in batches."""
+        results = {}
+        
+        # Process files in smaller batches
+        for i in range(0, len(file_ids), BATCH_SIZE):
+            batch_ids = file_ids[i:i + BATCH_SIZE]
+            try:
+                handler = BatchHandler(self.service, self.cache)
+                
+                for file_id in batch_ids:
+                    handler.add_trash_request(file_id)
+                
+                # Execute the batch
+                handler.execute()
+                results.update(handler.results)
+            except Exception as e:
+                logging.error(f"Batch trash operation failed: {e}")
+                # Mark all files in this batch as failed
+                for file_id in batch_ids:
+                    results[file_id] = False
+        
+        return results
 
 def handle_duplicate(drive_api: DriveAPI, file1: dict, file2: dict, duplicate_folders: Dict[str, Set[str]], delete: bool = False) -> None:
     """Handle a duplicate file pair with batched metadata fetching."""
     # Get metadata for both files in a single batch
-    metadata = get_files_metadata_batch(drive_api, [file1['id'], file2['id']])
+    metadata = drive_api.get_files_metadata_batch([file1['id'], file2['id']])
     
     file1_meta = metadata.get(file1['id'])
     file2_meta = metadata.get(file2['id'])
@@ -563,7 +559,7 @@ def handle_duplicate(drive_api: DriveAPI, file1: dict, file2: dict, duplicate_fo
                 break
             elif choice in ('1', '2'):
                 file_to_delete = file1_meta if choice == '1' else file2_meta
-                result = move_files_to_trash_batch(drive_api, [file_to_delete['id']])
+                result = drive_api.move_files_to_trash_batch([file_to_delete['id']])
                 if result.get(file_to_delete['id']):
                     print(f"File moved to trash: {file_to_delete['name']}")
                 else:
@@ -588,8 +584,8 @@ def write_to_csv(duplicate_pairs, drive_api: DriveAPI):
         
         for file1, file2 in duplicate_pairs:
             # Get complete metadata for both files
-            file1_meta = get_file_metadata(drive_api, file1['id'])
-            file2_meta = get_file_metadata(drive_api, file2['id'])
+            file1_meta = drive_api.get_file_metadata(file1['id'])
+            file2_meta = drive_api.get_file_metadata(file2['id'])
             
             if not file1_meta or not file2_meta:
                 continue
@@ -656,6 +652,82 @@ def _print_duplicate_group(files: List[Dict], metadata: Dict[str, dict]) -> None
         print(f"    ID: {file_meta['id']}")
         print(f"    Parent: {', '.join(file_meta.get('parents', ['No parent']))}")
 
+def _print_duplicate_folders_summary(drive_api: DriveAPI, duplicate_folders: Dict[str, Set[str]]):
+    """Print summary of folders containing duplicates."""
+    print("\nFolders containing duplicates:")
+    print("==============================")
+    
+    # Get all folder metadata in one batch
+    folder_ids = list(duplicate_folders.keys())
+    folder_metadata = drive_api.get_files_metadata_batch(folder_ids)
+    
+    # Calculate total size of duplicates in each folder
+    folder_info = []
+    for folder_id, files in duplicate_folders.items():
+        folder_meta = folder_metadata.get(folder_id)
+        if folder_meta:
+            # Get metadata for all files in this folder
+            file_metadata = drive_api.get_files_metadata_batch(list(files))
+            total_size = sum(int(meta.get('size', 0)) for meta in file_metadata.values())
+            
+            folder_info.append({
+                'name': folder_meta.get('name', 'Unknown'),
+                'count': len(files),
+                'id': folder_id,
+                'total_size': total_size
+            })
+    
+    # Sort by total size of duplicates (descending)
+    folder_info.sort(key=lambda x: x['total_size'], reverse=True)
+    
+    # Print sorted summary
+    for info in folder_info:
+        print(f"\n{info['name']}:")
+        print(f"  - {info['count']} duplicate files")
+        print(f"  - Total size: {get_human_readable_size(info['total_size'])}")
+        print(f"  - Folder ID: {info['id']}")
+
+def _get_duplicate_only_folders(drive_api: DriveAPI, duplicate_folders: Dict[str, Set[str]]) -> List[Dict]:
+    """Get folders that only contain duplicate files, ordered by decreasing size."""
+    # Get all folder metadata in one batch
+    folder_ids = list(duplicate_folders.keys())
+    folder_metadata = drive_api.get_files_metadata_batch(folder_ids)
+    
+    # Get all files in these folders
+    all_files = drive_api.list_files(force_refresh=True)
+    folder_files = defaultdict(set)
+    for file in all_files:
+        for parent in file.get('parents', []):
+            if parent in folder_ids:
+                folder_files[parent].add(file['id'])
+    
+    # Find folders that only contain duplicates
+    duplicate_only_folders = []
+    for folder_id, duplicate_files in duplicate_folders.items():
+        folder_meta = folder_metadata.get(folder_id)
+        if not folder_meta:
+            continue
+            
+        # Get all files in this folder
+        all_folder_files = folder_files.get(folder_id, set())
+        
+        # If all files in the folder are duplicates, add it to the list
+        if all_folder_files.issubset(duplicate_files):
+            # Get metadata for all files in this folder
+            file_metadata = drive_api.get_files_metadata_batch(list(duplicate_files))
+            total_size = sum(int(meta.get('size', 0)) for meta in file_metadata.values())
+            
+            duplicate_only_folders.append({
+                'name': folder_meta.get('name', 'Unknown'),
+                'count': len(duplicate_files),
+                'id': folder_id,
+                'total_size': total_size
+            })
+    
+    # Sort by total size of duplicates (descending)
+    duplicate_only_folders.sort(key=lambda x: x['total_size'], reverse=True)
+    return duplicate_only_folders
+
 def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bool = False) -> List[List[Dict]]:
     """Find duplicate files in Google Drive with batched operations."""
     # Get all files
@@ -687,7 +759,7 @@ def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bo
                     
                     # Get metadata for all files in this group at once
                     file_ids = [f['id'] for f in files]
-                    metadata = get_files_metadata_batch(drive_api, file_ids)
+                    metadata = drive_api.get_files_metadata_batch(file_ids)
                     
                     # Print group info
                     _print_duplicate_group(files, metadata)
@@ -720,6 +792,17 @@ def find_duplicates(drive_api: DriveAPI, delete: bool = False, force_refresh: bo
     # Print folder summary if there are duplicates
     if duplicate_folders:
         _print_duplicate_folders_summary(drive_api, duplicate_folders)
+        
+        # Print folders that only contain duplicates
+        duplicate_only_folders = _get_duplicate_only_folders(drive_api, duplicate_folders)
+        if duplicate_only_folders:
+            print("\nFolders containing only duplicates:")
+            print("================================")
+            for folder in duplicate_only_folders:
+                print(f"\n{folder['name']}:")
+                print(f"  - {folder['count']} duplicate files")
+                print(f"  - Total size: {get_human_readable_size(folder['total_size'])}")
+                print(f"  - Folder ID: {folder['id']}")
 
     return duplicate_groups
 
@@ -741,7 +824,7 @@ def _handle_group_deletion(drive_api: DriveAPI, files: List[dict], metadata: Dic
             if 0 <= idx < len(files):
                 # Move all other files to trash
                 files_to_trash = [f['id'] for i, f in enumerate(files) if i != idx]
-                results = move_files_to_trash_batch(drive_api, files_to_trash)
+                results = drive_api.move_files_to_trash_batch(files_to_trash)
                 
                 # Report results
                 success = sum(1 for v in results.values() if v)
@@ -750,35 +833,6 @@ def _handle_group_deletion(drive_api: DriveAPI, files: List[dict], metadata: Dic
         except ValueError:
             pass
         print("Invalid choice. Please enter a valid number or 's' to skip.")
-
-def _print_duplicate_folders_summary(drive_api: DriveAPI, duplicate_folders: Dict[str, Set[str]]):
-    """Print summary of folders containing duplicates."""
-    print("\nFolders containing duplicates:")
-    print("==============================")
-    
-    # Get all folder metadata in one batch
-    folder_ids = list(duplicate_folders.keys())
-    folder_metadata = get_files_metadata_batch(drive_api, folder_ids)
-    
-    # Sort folders by number of duplicates
-    folder_info = []
-    for folder_id, files in duplicate_folders.items():
-        folder_meta = folder_metadata.get(folder_id)
-        if folder_meta:
-            folder_info.append({
-                'name': folder_meta.get('name', 'Unknown'),
-                'count': len(files),
-                'id': folder_id
-            })
-    
-    # Sort by duplicate count
-    folder_info.sort(key=lambda x: x['count'], reverse=True)
-    
-    # Print sorted summary
-    for info in folder_info:
-        print(f"\n{info['name']}:")
-        print(f"  - {info['count']} duplicate files")
-        print(f"  - Folder ID: {info['id']}")
 
 def main():
     parser = argparse.ArgumentParser(description="Find duplicate files in Google Drive")

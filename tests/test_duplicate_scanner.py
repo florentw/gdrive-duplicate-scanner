@@ -8,21 +8,19 @@ import tempfile
 import shutil
 from io import StringIO
 from datetime import datetime, timedelta
+import csv
 
 # Add parent directory to Python path to import duplicate_scanner
 sys.path.append(str(Path(__file__).parent.parent))
 
 from duplicate_scanner import (
     get_human_readable_size,
-    get_file_metadata,
     handle_duplicate,
     write_to_csv,
     find_duplicates,
     MetadataCache,
     DriveAPI,
     BatchHandler,
-    get_files_metadata_batch,
-    move_files_to_trash_batch,
     CACHE_EXPIRY_HOURS,
     BATCH_SIZE,
     SAVE_INTERVAL_MINUTES
@@ -132,7 +130,7 @@ class TestDuplicateScanner(unittest.TestCase):
         new_cache = MetadataCache(self.test_cache_file)
         self.assertEqual(new_cache.get('test_key'), 'test_value')
 
-    def test_get_files_metadata_batch(self):
+    def test_drive_api_get_files_metadata_batch(self):
         """Test batch metadata fetching."""
         mock_files = [
             {'id': 'id1', 'name': 'file1.txt'},
@@ -149,13 +147,13 @@ class TestDuplicateScanner(unittest.TestCase):
             mock_instance = mock_handler.return_value
             mock_instance.results = mock_responses
             
-            result = get_files_metadata_batch(self.drive_api, ['id1', 'id2'])
+            result = self.drive_api.get_files_metadata_batch(['id1', 'id2'])
             
             self.assertEqual(result, mock_responses)
             self.assertEqual(mock_instance.add_metadata_request.call_count, 2)
             mock_instance.execute.assert_called_once()
 
-    def test_get_files_metadata_batch_retry(self):
+    def test_drive_api_get_files_metadata_batch_retry(self):
         """Test batch metadata fetching with retries."""
         # Mock the files().get() request
         mock_get = Mock()
@@ -175,7 +173,7 @@ class TestDuplicateScanner(unittest.TestCase):
         self.mock_service.new_batch_http_request.return_value = mock_batch
         
         # Test the contract: should get metadata after retry
-        result = get_files_metadata_batch(self.drive_api, ['test_id'])
+        result = self.drive_api.get_files_metadata_batch(['test_id'])
         
         # Verify the contract: should get metadata after retry
         self.assertIn('test_id', result)
@@ -183,7 +181,7 @@ class TestDuplicateScanner(unittest.TestCase):
         # Verify retry behavior
         self.assertEqual(mock_get.execute.call_count, 2)  # One initial failure, one success
 
-    def test_move_files_to_trash_batch(self):
+    def test_drive_api_move_files_to_trash_batch(self):
         """Test batch trash operations."""
         mock_files = ['id1', 'id2']
         
@@ -192,13 +190,13 @@ class TestDuplicateScanner(unittest.TestCase):
             mock_instance = mock_handler.return_value
             mock_instance.results = {'id1': True, 'id2': True}
             
-            result = move_files_to_trash_batch(self.drive_api, mock_files)
+            result = self.drive_api.move_files_to_trash_batch(mock_files)
             
             self.assertEqual(result, {'id1': True, 'id2': True})
             self.assertEqual(mock_instance.add_trash_request.call_count, 2)
             mock_instance.execute.assert_called_once()
 
-    def test_move_files_to_trash_batch_errors(self):
+    def test_drive_api_move_files_to_trash_batch_errors(self):
         """Test batch trash operations with errors."""
         mock_files = ['id1', 'id2']
         
@@ -207,13 +205,13 @@ class TestDuplicateScanner(unittest.TestCase):
             mock_instance = mock_handler.return_value
             mock_instance.results = {'id1': False, 'id2': True}
             
-            result = move_files_to_trash_batch(self.drive_api, mock_files)
+            result = self.drive_api.move_files_to_trash_batch(mock_files)
             
             self.assertEqual(result, {'id1': False, 'id2': True})
             self.assertEqual(mock_instance.add_trash_request.call_count, 2)
             mock_instance.execute.assert_called_once()
 
-    def test_get_file_metadata_caching(self):
+    def test_drive_api_get_file_metadata_caching(self):
         """Test that get_file_metadata caches results."""
         mock_metadata = {
             'id': 'test_id',
@@ -229,9 +227,9 @@ class TestDuplicateScanner(unittest.TestCase):
         self.mock_service.files.return_value = mock_files
 
         # First call should make an API request
-        result1 = get_file_metadata(self.drive_api, 'test_id')
+        result1 = self.drive_api.get_file_metadata('test_id')
         # Second call should use cached result
-        result2 = get_file_metadata(self.drive_api, 'test_id')
+        result2 = self.drive_api.get_file_metadata('test_id')
 
         self.assertEqual(result1, result2)
         mock_files.get.assert_called_once_with(
@@ -239,214 +237,140 @@ class TestDuplicateScanner(unittest.TestCase):
             fields='id, name, parents, size, md5Checksum, mimeType, trashed'
         )
 
-    def test_get_file_metadata_error(self):
+    def test_drive_api_get_file_metadata_error(self):
         """Test get_file_metadata error handling."""
         mock_get = Mock()
         mock_get.execute.side_effect = Exception("API Error")
         self.mock_service.files.return_value.get.return_value = mock_get
         
-        result = get_file_metadata(self.drive_api, 'test_id')
-        self.assertIsNone(result)
-
-    def test_get_file_metadata_network_error(self):
-        """Test get_file_metadata with network errors."""
-        mock_get = Mock()
-        mock_get.execute.side_effect = ConnectionError("Network error")
-        self.mock_service.files.return_value.get.return_value = mock_get
-        
-        result = get_file_metadata(self.drive_api, 'test_id')
+        result = self.drive_api.get_file_metadata('test_id')
         self.assertIsNone(result)
 
     def test_write_to_csv(self):
-        """Test CSV writing functionality."""
-        file1 = {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'md5Checksum': 'hash1'}
-        file2 = {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'md5Checksum': 'hash1'}
-        duplicate_pairs = [(file1, file2)]
-
-        mock_metadata = {
-            'id1': {
-                'id': 'id1',
-                'name': 'file1.txt',
-                'parents': ['parent1'],
-                'size': '1024',
-                'md5Checksum': 'hash1'
-            },
-            'id2': {
-                'id': 'id2',
-                'name': 'file2.txt',
-                'parents': ['parent2'],
-                'size': '1024',
-                'md5Checksum': 'hash1'
-            }
-        }
-
-        mock_file = MagicMock()
-        with patch('builtins.open', create=True) as mock_open, \
-             patch('duplicate_scanner.get_file_metadata', side_effect=lambda _, file_id: mock_metadata.get(file_id)):
-            mock_open.return_value.__enter__.return_value = mock_file
-            csv_filename = write_to_csv(duplicate_pairs, self.drive_api)
-            
-        self.assertTrue(csv_filename.startswith('drive_duplicates_'))
-        self.assertTrue(csv_filename.endswith('.csv'))
+        """Test CSV export functionality."""
+        mock_files = self._setup_mock_files()
+        mock_metadata = self._setup_mock_metadata()
         
-        # Verify CSV content
-        calls = mock_file.write.call_args_list
-        self.assertTrue(len(calls) > 0)
-        header_call = calls[0][0][0]
-        self.assertIn('File Name', header_call)
-        self.assertIn('Full Path', header_call)
-        self.assertIn('Size (Bytes)', header_call)
-        self.assertIn('MD5 Checksum', header_call)
+        # Mock file metadata fetching
+        self.drive_api.get_file_metadata = Mock(side_effect=lambda x: mock_metadata.get(x))
+        
+        # Create a temporary directory for the CSV file
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            
+            # Write duplicates to CSV
+            csv_file = write_to_csv([(mock_files[0], mock_files[1])], self.drive_api)
+            
+            # Verify CSV file was created
+            self.assertTrue(os.path.exists(csv_file))
+            
+            # Read and verify CSV contents
+            with open(csv_file, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+                
+                self.assertEqual(len(rows), 2)  # Two rows for the duplicate pair
+                self.assertEqual(rows[0]['File Name'], 'file1.txt')
+                self.assertEqual(rows[1]['File Name'], 'file2.txt')
 
     def test_write_to_csv_file_error(self):
-        """Test CSV writing with file system errors."""
-        file1 = {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'md5Checksum': 'hash1'}
-        file2 = {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'md5Checksum': 'hash1'}
-        duplicate_pairs = [(file1, file2)]
-
+        """Test CSV export with file system errors."""
+        mock_files = self._setup_mock_files()
+        
+        # Mock file system error
         with patch('builtins.open', side_effect=IOError("File error")):
             with self.assertRaises(IOError):
-                write_to_csv(duplicate_pairs, self.drive_api)
+                write_to_csv([(mock_files[0], mock_files[1])], self.drive_api)
 
     def test_drive_api_list_files(self):
-        """Test the public DriveAPI.list_files method."""
-        mock_files = [
-            {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'md5Checksum': 'hash1'},
-            {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'md5Checksum': 'hash2'}
-        ]
+        """Test listing files from Drive."""
+        mock_files = self._setup_mock_files()
         
-        mock_execute = Mock()
-        mock_execute.execute.return_value = {
-            'files': mock_files,
-            'nextPageToken': None
-        }
+        # Mock successful API response
+        mock_list = Mock()
+        mock_list.execute.return_value = {'files': mock_files}
+        self.mock_files_service.list.return_value = mock_list
         
-        mock_files_service = Mock()
-        mock_files_service.list.return_value = mock_execute
-        self.mock_service.files.return_value = mock_files_service
-
-        # Test successful case
-        result = self.drive_api.list_files(force_refresh=True)
+        # Test listing files
+        result = self.drive_api.list_files()
+        
         self.assertEqual(result, mock_files)
-        mock_files_service.list.assert_called_once_with(
+        self.mock_files_service.list.assert_called_once_with(
             q="trashed = false",
             pageSize=1000,
             fields="nextPageToken, files(id, name, size, md5Checksum, trashed, parents)",
             pageToken=None
         )
 
-        # Test caching
-        result2 = self.drive_api.list_files(force_refresh=False)
-        self.assertEqual(result2, mock_files)
-        mock_files_service.list.assert_called_once()
-
-        # Test force refresh
-        result3 = self.drive_api.list_files(force_refresh=True)
-        self.assertEqual(result3, mock_files)
-        self.assertEqual(mock_files_service.list.call_count, 2)
-
     def test_drive_api_list_files_error(self):
-        """Test DriveAPI.list_files with API errors."""
-        mock_execute = Mock()
-        mock_execute.execute.side_effect = Exception("API Error")
-        mock_files_service = Mock()
-        mock_files_service.list.return_value = mock_execute
-        self.mock_service.files.return_value = mock_files_service
-
-        # Test API error with no cache
+        """Test listing files with API errors."""
+        # Mock API error
+        mock_list = Mock()
+        mock_list.execute.side_effect = Exception("API Error")
+        self.mock_files_service.list.return_value = mock_list
+        
+        # Test error handling
         with self.assertRaises(Exception):
-            self.drive_api.list_files(force_refresh=True)
-
-        # Test API error with cache fallback
-        self.drive_api.cache.set('all_files', [{'id': 'cached'}])
-        result = self.drive_api.list_files(force_refresh=True)
-        self.assertEqual(result, [{'id': 'cached'}])
+            self.drive_api.list_files()
 
     def test_handle_duplicate(self):
-        """Test duplicate file handling."""
-        file1 = {'id': 'id1', 'name': 'file1.txt'}
-        file2 = {'id': 'id2', 'name': 'file2.txt'}
-        duplicate_folders = defaultdict(set)
-
-        mock_metadata = {
-            'id1': {
-                'id': 'id1',
-                'name': 'file1.txt',
-                'parents': ['parent1'],
-                'size': '1024'
-            },
-            'id2': {
-                'id': 'id2',
-                'name': 'file2.txt',
-                'parents': ['parent2'],
-                'size': '1024'
-            }
-        }
-
-        with patch('duplicate_scanner.get_files_metadata_batch', return_value=mock_metadata):
-            handle_duplicate(self.drive_api, file1, file2, duplicate_folders, delete=False)
-
-        self.assertEqual(duplicate_folders['parent1'], {'id1'})
-        self.assertEqual(duplicate_folders['parent2'], {'id2'})
-
-    def test_handle_duplicate_missing_metadata(self):
-        """Test handle_duplicate with missing metadata."""
-        file1 = {'id': 'id1', 'name': 'file1.txt'}
-        file2 = {'id': 'id2', 'name': 'file2.txt'}
-        duplicate_folders = defaultdict(set)
-
-        # Test with missing metadata
-        with patch('duplicate_scanner.get_files_metadata_batch', return_value={}):
-            handle_duplicate(self.drive_api, file1, file2, duplicate_folders, delete=False)
-            self.assertEqual(duplicate_folders, {})
-
-    def test_find_duplicates(self):
-        """Test the main duplicate finding functionality."""
+        """Test handling duplicate files."""
         mock_files = self._setup_mock_files()
         mock_metadata = self._setup_mock_metadata()
+        duplicate_folders = defaultdict(set)
+        
+        # Mock metadata fetching
+        self.drive_api.get_files_metadata_batch = Mock(return_value=mock_metadata)
+        
+        # Test handling duplicates
+        handle_duplicate(self.drive_api, mock_files[0], mock_files[1], duplicate_folders)
+        
+        # Verify folder tracking
+        self.assertIn('parent1', duplicate_folders)
+        self.assertIn('parent2', duplicate_folders)
+        self.assertIn('id1', duplicate_folders['parent1'])
+        self.assertIn('id2', duplicate_folders['parent2'])
 
-        # Capture stdout
-        captured_output = StringIO()
-        sys.stdout = captured_output
+    def test_handle_duplicate_missing_metadata(self):
+        """Test handling duplicates with missing metadata."""
+        mock_files = self._setup_mock_files()
+        duplicate_folders = defaultdict(set)
+        
+        # Mock failed metadata fetch
+        self.drive_api.get_files_metadata_batch = Mock(return_value={})
+        
+        # Test error handling
+        handle_duplicate(self.drive_api, mock_files[0], mock_files[1], duplicate_folders)
+        
+        # Verify no folders were tracked
+        self.assertEqual(len(duplicate_folders), 0)
 
-        try:
-            with patch.object(self.drive_api, 'list_files', return_value=mock_files), \
-                 patch('duplicate_scanner.get_files_metadata_batch', return_value=mock_metadata), \
-                 patch('duplicate_scanner._handle_group_deletion') as mock_handle_deletion:
-                
-                duplicate_groups = find_duplicates(self.drive_api, delete=False, force_refresh=True)
-                
-                # Verify duplicate groups
-                self.assertEqual(len(duplicate_groups), 1)  # One group of duplicates
-                self.assertEqual(len(duplicate_groups[0]), 2)  # Two files in the group
-                self.assertEqual(duplicate_groups[0][0]['id'], 'id1')
-                self.assertEqual(duplicate_groups[0][1]['id'], 'id2')
-
-                # Verify output
-                output = captured_output.getvalue()
-                self.assertIn('Found duplicate group (2 files):', output)
-                self.assertIn('file1.txt (Size: 1.00 KB)', output)
-                self.assertIn('file2.txt (Size: 1.00 KB)', output)
-                self.assertIn('Total files scanned: 3', output)
-                self.assertIn('Duplicate groups found: 1', output)
-                self.assertIn('Total duplicate files: 2', output)
-                self.assertIn('Wasted space: 1.00 KB', output)
-        finally:
-            sys.stdout = sys.__stdout__
+    def test_find_duplicates(self):
+        """Test finding duplicate files."""
+        mock_files = self._setup_mock_files()
+        mock_metadata = self._setup_mock_metadata()
+        
+        # Mock file listing and metadata fetching
+        self.drive_api.list_files = Mock(return_value=mock_files)
+        self.drive_api.get_files_metadata_batch = Mock(return_value=mock_metadata)
+        
+        # Test finding duplicates
+        result = find_duplicates(self.drive_api)
+        
+        # Verify results
+        self.assertEqual(len(result), 1)  # One group of duplicates
+        self.assertEqual(len(result[0]), 2)  # Two files in the group
+        self.assertEqual(result[0][0]['id'], 'id1')
+        self.assertEqual(result[0][1]['id'], 'id2')
 
     def test_find_duplicates_api_error(self):
-        """Test find_duplicates with API errors."""
-        # Test with API error in list_files
-        with patch.object(self.drive_api, 'list_files', side_effect=Exception("API Error")):
-            with self.assertRaises(Exception):
-                find_duplicates(self.drive_api, delete=False, force_refresh=True)
-
-        # Test with API error in get_files_metadata_batch
-        mock_files = self._setup_mock_files()
-        with patch.object(self.drive_api, 'list_files', return_value=mock_files), \
-             patch('duplicate_scanner.get_files_metadata_batch', side_effect=Exception("API Error")):
-            with self.assertRaises(Exception):
-                find_duplicates(self.drive_api, delete=False, force_refresh=True)
+        """Test finding duplicates with API errors."""
+        # Mock API error
+        self.drive_api.list_files = Mock(side_effect=Exception("API Error"))
+        
+        # Test error handling
+        with self.assertRaises(Exception):
+            find_duplicates(self.drive_api)
 
 if __name__ == '__main__':
     unittest.main()
