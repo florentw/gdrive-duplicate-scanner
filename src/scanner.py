@@ -51,6 +51,24 @@ class BaseDuplicateScanner:
             self.duplicate_groups.append(group)
             group.print_info()
 
+    def _scan_for_duplicates(self, files: List[Dict]) -> None:
+        """Common scanning logic for finding duplicate files."""
+        # Filter valid files
+        valid_files = self._filter_valid_files(files)
+        logger.info(f"Found {len(valid_files)} valid files to check for duplicates")
+        
+        # Group by size first
+        size_groups = self._group_files_by_size(valid_files)
+        logger.info(f"Found {len(size_groups)} unique file sizes")
+        
+        # For each size group, check MD5 hashes
+        for size, files in size_groups.items():
+            if len(files) > 1:  # Only check if there are multiple files of the same size
+                md5_groups = self._group_files_by_md5(files)
+                for md5, duplicate_files in md5_groups.items():
+                    if len(duplicate_files) > 1:  # Only process if there are actual duplicates
+                        self._process_duplicate_group(duplicate_files, {})
+
     def scan(self) -> None:
         """Scan for duplicate files."""
         raise NotImplementedError("Subclasses must implement scan()")
@@ -68,21 +86,8 @@ class DuplicateScanner(BaseDuplicateScanner):
             files = self.drive_api.list_files()
             self.cache.cache_files(files)
         
-        # Filter valid files
-        valid_files = self._filter_valid_files(files)
-        logger.info(f"Found {len(valid_files)} valid files to check for duplicates")
-        
-        # Group by size first
-        size_groups = self._group_files_by_size(valid_files)
-        logger.info(f"Found {len(size_groups)} unique file sizes")
-        
-        # For each size group, check MD5 hashes
-        for size, files in size_groups.items():
-            if len(files) > 1:  # Only check if there are multiple files of the same size
-                md5_groups = self._group_files_by_md5(files)
-                for md5, duplicate_files in md5_groups.items():
-                    if len(duplicate_files) > 1:  # Only process if there are actual duplicates
-                        self._process_duplicate_group(duplicate_files, {})
+        # Use common scanning logic
+        self._scan_for_duplicates(files)
         
         logger.info(f"Found {len(self.duplicate_groups)} groups of duplicate files")
 
@@ -102,21 +107,8 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
             self.cache.cache_files(files)
             self.cache.cache_folders(folders)
         
-        # Filter valid files
-        valid_files = self._filter_valid_files(files)
-        logger.info(f"Found {len(valid_files)} valid files to check for duplicates")
-        
-        # Group by size first
-        size_groups = self._group_files_by_size(valid_files)
-        logger.info(f"Found {len(size_groups)} unique file sizes")
-        
-        # For each size group, check MD5 hashes
-        for size, files in size_groups.items():
-            if len(files) > 1:  # Only check if there are multiple files of the same size
-                md5_groups = self._group_files_by_md5(files)
-                for md5, duplicate_files in md5_groups.items():
-                    if len(duplicate_files) > 1:  # Only process if there are actual duplicates
-                        self._process_duplicate_group(duplicate_files, {})
+        # Use common scanning logic
+        self._scan_for_duplicates(files)
         
         # Analyze folder structures
         self._analyze_folder_structures(folders)
