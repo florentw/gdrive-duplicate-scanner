@@ -158,17 +158,15 @@ class DriveAPI:
 
         # Process remaining files in batches
         batch_handler = self._get_batch_handler()
-        with tqdm(total=len(remaining_ids), desc="Loading file details", unit="file") as pbar:
-            for i in range(0, len(remaining_ids), BATCH_SIZE):
-                batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
-                
-                # Add requests to batch
-                for file_id in batch_ids:
-                    batch_handler.add_metadata_request(file_id)
-                
-                # Process batch results
-                self._process_batch_results(batch_handler, batch_ids, results)
-                pbar.update(len(batch_ids))
+        for i in range(0, len(remaining_ids), BATCH_SIZE):
+            batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
+            
+            # Add requests to batch
+            for file_id in batch_ids:
+                batch_handler.add_metadata_request(file_id)
+            
+            # Process batch results
+            self._process_batch_results(batch_handler, batch_ids, results)
 
         return results
 
