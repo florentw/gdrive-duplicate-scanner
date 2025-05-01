@@ -4,28 +4,44 @@ import logging
 import sys
 from pathlib import Path
 
-# Configure root logger
-logging.basicConfig(
-    level=logging.INFO,  # Changed from WARNING to INFO to show batch statistics
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('drive_scanner.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+def setup_logger():
+    """Set up and configure the drive_scanner logger."""
+    # Configure logging format
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+    formatter = logging.Formatter(log_format)
 
-# Create and configure the drive_scanner logger
-logger = logging.getLogger('drive_scanner')
-logger.setLevel(logging.INFO)
-logger.propagate = False
+    # Create logger if it doesn't exist
+    logger = logging.getLogger('drive_scanner')
+    
+    # Remove any existing handlers
+    logger.handlers.clear()
+    
+    # Set level
+    logger.setLevel(logging.INFO)
+    
+    # Add file handler
+    file_handler = logging.FileHandler('drive_scanner.log')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    # Add console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # Prevent propagation to root logger
+    logger.propagate = False
+    
+    return logger
 
-# Add handlers to drive_scanner logger
-logger.addHandler(logging.FileHandler('drive_scanner.log'))
-logger.addHandler(logging.StreamHandler(sys.stdout))
+# Set up the logger
+logger = setup_logger()
 
 # Set external library loggers to WARNING
 for lib in ['googleapiclient', 'oauth2client', 'urllib3']:
-    logging.getLogger(lib).setLevel(logging.WARNING)
+    lib_logger = logging.getLogger(lib)
+    lib_logger.setLevel(logging.WARNING)
+    lib_logger.propagate = False
 
 # Google Drive API scopes
 SCOPES = ['https://www.googleapis.com/auth/drive']
