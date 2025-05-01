@@ -7,12 +7,24 @@ from src.cache import MetadataCache
 from src.drive_api import DriveAPI
 from src.scanner import BaseDuplicateScanner, DuplicateScanner, DuplicateScannerWithFolders
 from src.models import DuplicateGroup, DuplicateFolder
+import logging
 
 class TestBaseDuplicateScanner(unittest.TestCase):
     def setUp(self):
+        """Set up test fixtures."""
         self.drive_api = Mock()
         self.cache = Mock()
         self.scanner = BaseDuplicateScanner(self.drive_api, self.cache)
+        # Clear logger handlers before each test
+        logger = logging.getLogger('drive_scanner')
+        logger.handlers.clear()
+        logger.setLevel(logging.INFO)
+
+    def tearDown(self):
+        """Clean up after each test."""
+        # Clean up logger handlers
+        logger = logging.getLogger('drive_scanner')
+        logger.handlers.clear()
 
     def test_filter_valid_files(self):
         test_files = [
@@ -189,6 +201,53 @@ class TestDuplicateScanner(unittest.TestCase):
         self.assertEqual(len(self.scanner.duplicate_groups), 1)
         self.cache.get_all_files.assert_called_once()
         self.drive_api.list_files.assert_called_once()
+        self.cache.cache_files.assert_called_once_with(test_files)
+
+    def test_scan_lists_files_only_once(self):
+        """Test that files are only listed once during a scan."""
+        # Setup test data
+        test_files = [
+            {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain'},
+            {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain'}
+        ]
+        
+        # Mock cache to return no files first, then return the cached files
+        self.cache.get_all_files.side_effect = [None, test_files]
+        self.drive_api.list_files.return_value = test_files
+        
+        # Run scan
+        self.scanner.scan()
+        
+        # Verify list_files was called exactly once
+        self.drive_api.list_files.assert_called_once()
+        
+        # Run scan again
+        self.scanner.scan()
+        
+        # Verify list_files was still only called once (cache should be used)
+        self.drive_api.list_files.assert_called_once()
+        
+        # Verify cache was used on second call
+        self.assertEqual(self.cache.get_all_files.call_count, 2)
+
+    def test_scan_with_refresh_cache(self):
+        """Test that force refreshing cache causes a new file list."""
+        # Setup test data
+        test_files = [
+            {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain'},
+            {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain'}
+        ]
+        
+        # Mock cache to return files
+        self.cache.get_all_files.return_value = test_files
+        self.drive_api.list_files.return_value = test_files
+        
+        # Run scan with force_refresh=True
+        self.scanner.scan(force_refresh=True)
+        
+        # Verify cache was cleared and list_files was called
+        self.cache.clear.assert_called_once()
+        self.drive_api.list_files.assert_called_once_with(force_refresh=True)
         self.cache.cache_files.assert_called_once_with(test_files)
 
 class TestDuplicateScannerWithFolders(unittest.TestCase):

@@ -108,15 +108,25 @@ class BaseDuplicateScanner:
 class DuplicateScanner(BaseDuplicateScanner):
     """Scanner for finding duplicate files in Google Drive."""
     
-    def scan(self) -> None:
-        """Scan for duplicate files."""
+    def scan(self, force_refresh: bool = False) -> None:
+        """Scan for duplicate files.
+        
+        Args:
+            force_refresh: If True, clear the cache and fetch fresh data from the API.
+        """
         self.logger.info("Starting duplicate file scan...")
         
         # Get all files from cache or API
-        files = self.cache.get_all_files()
-        if not files:
-            files = self.drive_api.list_files()
+        files = None
+        if force_refresh:
+            self.cache.clear()
+            files = self.drive_api.list_files(force_refresh=True)
             self.cache.cache_files(files)
+        else:
+            files = self.cache.get_all_files()
+            if not files:
+                files = self.drive_api.list_files()
+                self.cache.cache_files(files)
         
         # Use common scanning logic
         self._scan_for_duplicates(files)
