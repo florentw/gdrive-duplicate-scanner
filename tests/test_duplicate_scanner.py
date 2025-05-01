@@ -300,29 +300,19 @@ class TestDuplicateScanner(unittest.TestCase):
             {'id': 'id2', 'name': 'file2.txt'}
         ]
         
-        # Mock API responses for progress bar
-        initial_response = {'files': [{'id': 'id1'}]}  # First call to get file count
-        count_response = {'files': mock_files}  # Second call to get total count
-        final_response = {'files': mock_files}  # Final call to get actual files
-        
-        # Set up mock to return different responses
-        self.mock_files_service.list.return_value.execute.side_effect = [
-            initial_response,  # For pageSize=1
-            count_response,   # For pageSize=1000
-            final_response    # For actual file listing
-        ]
+        # Mock API response
+        mock_response = {'files': mock_files}
+        self.mock_files_service.list.return_value.execute.return_value = mock_response
         
         result = self.drive_api.list_files()
         
         self.assertEqual(result, mock_files)
-        # Verify all expected calls were made
-        self.assertEqual(self.mock_files_service.list.call_count, 3)
-        
-        # Verify the calls were made with correct parameters
-        calls = self.mock_files_service.list.call_args_list
-        self.assertEqual(calls[0][1]['pageSize'], 1)
-        self.assertEqual(calls[1][1]['pageSize'], 1000)
-        self.assertIn(METADATA_FIELDS, calls[2][1]['fields'])
+        # Verify the call was made with correct parameters
+        self.mock_files_service.list.assert_called_once()
+        call_args = self.mock_files_service.list.call_args[1]
+        self.assertIn(METADATA_FIELDS, call_args['fields'])
+        self.assertEqual(call_args['q'], "trashed=false")
+        self.assertEqual(call_args['spaces'], 'drive')
 
     def test_drive_api_list_files_error(self):
         """Test listing files error handling."""
@@ -944,17 +934,17 @@ class TestDuplicateScanner(unittest.TestCase):
         ]
         mock_service.files().list().execute.return_value = {'files': mock_files}
         
-        # List files should increment counter by 3 (2 for _get_total_file_count + 1 for actual list)
+        # List files should increment counter by 1 (just the actual list call)
         api.list_files()
-        self.assertEqual(api.api_request_count, 4)
+        self.assertEqual(api.api_request_count, 2)
         
         # Second list should use cache and not increment counter
         api.list_files()
-        self.assertEqual(api.api_request_count, 4)
+        self.assertEqual(api.api_request_count, 2)
         
-        # Force refresh should increment counter by 3 again
+        # Force refresh should increment counter by 1 again
         api.list_files(force_refresh=True)
-        self.assertEqual(api.api_request_count, 7)
+        self.assertEqual(api.api_request_count, 3)
 
 if __name__ == '__main__':
     unittest.main()

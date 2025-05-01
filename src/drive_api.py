@@ -49,34 +49,6 @@ class DriveAPI:
             'total_api_requests': self.api_request_count
         }
 
-    def _get_total_file_count(self) -> int:
-        """Get total number of files in Google Drive."""
-        try:
-            self._increment_request_count()  # Count initial API request
-            initial_response = self.service.files().list(
-                q="trashed=false",
-                spaces='drive',
-                fields='nextPageToken, files(id)',
-                pageSize=1
-            ).execute()
-            
-            if not initial_response.get('files'):
-                return 0
-                
-            # Get total count from the API
-            self._increment_request_count()  # Count second API request
-            count_response = self.service.files().list(
-                q="trashed=false",
-                spaces='drive',
-                fields='nextPageToken, files(id)',
-                pageSize=1000
-            ).execute()
-            return len(count_response.get('files', []))
-            
-        except Exception as e:
-            logging.error(f"Error getting file count: {e}")
-            return 0
-
     def _fetch_files_page(self, page_token: Optional[str] = None) -> tuple[List[Dict], Optional[str]]:
         """Fetch a single page of files from Google Drive."""
         try:
@@ -103,9 +75,8 @@ class DriveAPI:
 
         files = []
         page_token = None
-        total_count = self._get_total_file_count()
         
-        with tqdm(total=total_count, desc="Scanning Drive", unit="file") as pbar:
+        with tqdm(desc="Scanning Drive", unit="file") as pbar:
             while True:
                 new_files, page_token = self._fetch_files_page(page_token)
                 files.extend(new_files)
