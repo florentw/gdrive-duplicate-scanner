@@ -6,19 +6,21 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List
 from config import CACHE_FILE, SAVE_INTERVAL_MINUTES
 
+
 def get_cache_key():
     """Generate a unique cache key based on the credentials file."""
     try:
-        with open('credentials.json', 'rb') as f:
+        with open("credentials.json", "rb") as f:
             content = f.read()
             # Use first 8 characters of hash to identify the account
             return hashlib.md5(content).hexdigest()[:8]
     except FileNotFoundError:
-        return 'default'
+        return "default"
+
 
 class MetadataCache:
     """Centralized cache manager for file metadata."""
-    
+
     def __init__(self, cache_file: str = CACHE_FILE):
         self._cache_file = cache_file
         self._temp_file = f"{cache_file}.tmp"
@@ -32,26 +34,28 @@ class MetadataCache:
         if not (self._modified or force):
             return
 
-        if not force and datetime.now() - self._last_save < timedelta(minutes=SAVE_INTERVAL_MINUTES):
+        if not force and datetime.now() - self._last_save < timedelta(
+            minutes=SAVE_INTERVAL_MINUTES
+        ):
             return
 
         try:
             data = {
-                'timestamp': datetime.now().isoformat(),
-                'cache_key': get_cache_key(),
-                'files': self._cache
+                "timestamp": datetime.now().isoformat(),
+                "cache_key": get_cache_key(),
+                "files": self._cache,
             }
-            
+
             # Write to temporary file first
-            with open(self._temp_file, 'w') as f:
+            with open(self._temp_file, "w") as f:
                 json.dump(data, f)
-            
+
             # Atomic rename
             os.replace(self._temp_file, self._cache_file)
-            
+
             self._last_save = datetime.now()
             self._modified = False
-            cached_files = self._cache.get('all_files', [])
+            cached_files = self._cache.get("all_files", [])
             logging.info(f"Saved cache with {len(cached_files)} files")
 
         except Exception as e:
@@ -66,19 +70,21 @@ class MetadataCache:
         """Load cache from disk."""
         try:
             if os.path.exists(self._cache_file):
-                with open(self._cache_file, 'r') as f:
+                with open(self._cache_file, "r") as f:
                     data = json.load(f)
-                    
+
                     # Skip if cache key doesn't match
-                    if data.get('cache_key') != get_cache_key():
+                    if data.get("cache_key") != get_cache_key():
                         logging.info("Cache key mismatch, starting fresh")
                         self._cache = {}
                         self._last_save = None
                         self._save(force=True)  # Save empty cache
                         return
-                    
-                    self._cache = data.get('files', {})
-                    self._last_save = datetime.fromisoformat(data.get('timestamp', datetime.now().isoformat()))
+
+                    self._cache = data.get("files", {})
+                    self._last_save = datetime.fromisoformat(
+                        data.get("timestamp", datetime.now().isoformat())
+                    )
         except Exception as e:
             logging.error(f"Failed to load cache: {e}")
             self._cache = {}
@@ -115,21 +121,21 @@ class MetadataCache:
 
     def get_all_files(self) -> List[Dict]:
         """Get all cached files."""
-        return self._cache.get('all_files', [])
+        return self._cache.get("all_files", [])
 
     def get_all_folders(self) -> List[Dict]:
         """Get all cached folders."""
-        return self._cache.get('all_folders', [])
+        return self._cache.get("all_folders", [])
 
     def cache_files(self, files: List[Dict]) -> None:
         """Cache a list of files."""
-        self._cache['all_files'] = files
+        self._cache["all_files"] = files
         self._modified = True
         self._save()
 
     def cache_folders(self, folders: List[Dict]) -> None:
         """Cache a list of folders."""
-        self._cache['all_folders'] = folders
+        self._cache["all_folders"] = folders
         self._modified = True
         self._save()
 
@@ -140,4 +146,4 @@ class MetadataCache:
     def __exit__(self, *_):
         """Context manager exit - ensure cache is saved."""
         if self._modified:
-            self._save(force=True) 
+            self._save(force=True)

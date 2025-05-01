@@ -6,9 +6,10 @@ from googleapiclient.http import BatchHttpRequest
 from cache import MetadataCache
 from config import BATCH_SIZE, MAX_RETRIES, RETRY_DELAY
 
+
 class BatchHandler:
     """Handles batch requests to Google Drive API."""
-    
+
     def __init__(self, service: Resource, cache: MetadataCache):
         self.service = service
         self.cache = cache
@@ -40,9 +41,9 @@ class BatchHandler:
         self.batch.add(
             self.service.files().get(
                 fileId=file_id,
-                fields='id, name, parents, size, md5Checksum, mimeType, trashed'
+                fields="id, name, parents, size, md5Checksum, mimeType, trashed",
             ),
-            callback=callback
+            callback=callback,
         )
 
     def add_trash_request(self, file_id: str) -> None:
@@ -61,11 +62,8 @@ class BatchHandler:
                 self.cache.remove([file_id])
 
         self.batch.add(
-            self.service.files().update(
-                fileId=file_id,
-                body={'trashed': True}
-            ),
-            callback=callback
+            self.service.files().update(fileId=file_id, body={"trashed": True}),
+            callback=callback,
         )
 
     def execute(self) -> None:
@@ -79,10 +77,14 @@ class BatchHandler:
                 break
             except Exception as e:
                 if attempt < MAX_RETRIES - 1:
-                    logging.warning(f"Batch execution failed, retrying in {RETRY_DELAY} seconds: {e}")
+                    logging.warning(
+                        f"Batch execution failed, retrying in {RETRY_DELAY} seconds: {e}"
+                    )
                     time.sleep(RETRY_DELAY)
                 else:
-                    logging.error(f"Batch execution failed after {MAX_RETRIES} attempts: {e}")
+                    logging.error(
+                        f"Batch execution failed after {MAX_RETRIES} attempts: {e}"
+                    )
                     raise
 
         # Initialize new batch for next use, but preserve results and failed_requests
@@ -94,4 +96,4 @@ class BatchHandler:
 
     def get_failed_requests(self) -> Set[str]:
         """Get the set of failed request IDs."""
-        return self.failed_requests 
+        return self.failed_requests
