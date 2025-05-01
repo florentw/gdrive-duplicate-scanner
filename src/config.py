@@ -3,6 +3,7 @@
 import logging
 import sys
 from pathlib import Path
+from datetime import datetime
 
 def setup_logger():
     """Set up and configure the drive_scanner logger."""
@@ -19,8 +20,12 @@ def setup_logger():
     # Set level
     logger.setLevel(logging.INFO)
     
+    # Generate timestamp for log file
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_filename = f'drive_scanner_{timestamp}.log'
+    
     # Add file handler
-    file_handler = logging.FileHandler('drive_scanner.log')
+    file_handler = logging.FileHandler(log_filename)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     
