@@ -69,7 +69,7 @@ class DriveAPI:
     def list_files(self, force_refresh: bool = False) -> List[Dict]:
         """List all non-trashed files in Google Drive."""
         if not force_refresh:
-            cached_files = self.cache.get('all_files')
+            cached_files = self.cache.get_all_files()
             if cached_files:
                 return cached_files
 
@@ -86,7 +86,7 @@ class DriveAPI:
                     break
 
         if files:
-            self.cache.set('all_files', files)
+            self.cache.cache_files(files)
             
         return files
 
