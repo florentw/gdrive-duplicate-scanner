@@ -1,10 +1,12 @@
+"""Configuration module for Google Drive API access."""
+
 import logging
 import sys
 from pathlib import Path
 
 # Configure root logger
 logging.basicConfig(
-    level=logging.WARNING,
+    level=logging.INFO,  # Changed from WARNING to INFO to show batch statistics
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('drive_scanner.log'),
@@ -16,6 +18,10 @@ logging.basicConfig(
 logger = logging.getLogger('drive_scanner')
 logger.setLevel(logging.INFO)
 logger.propagate = False
+
+# Add handlers to drive_scanner logger
+logger.addHandler(logging.FileHandler('drive_scanner.log'))
+logger.addHandler(logging.StreamHandler(sys.stdout))
 
 # Set external library loggers to WARNING
 for lib in ['googleapiclient', 'oauth2client', 'urllib3']:
@@ -49,4 +55,6 @@ SAVE_INTERVAL_MINUTES = 1  # Save cache every minute
 BATCH_SIZE = 100  # Reduced from 900 to 100 to stay well under Google's limits
 MAX_RETRIES = 3
 RETRY_DELAY = 1  # seconds
+
+# Fields needed for file operations
 METADATA_FIELDS = 'id, name, parents, size, md5Checksum, mimeType, trashed' 

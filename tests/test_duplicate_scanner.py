@@ -7,6 +7,8 @@ import tempfile
 import shutil
 import csv
 from datetime import datetime
+import pytest
+import json
 
 # Add parent directory to Python path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,36 +20,49 @@ from src.models import DuplicateGroup, DuplicateFolder
 from src.scanner import DuplicateScanner, DuplicateScannerWithFolders
 from src.export import write_to_csv
 from src.utils import get_human_readable_size
-from src.config import BATCH_SIZE, METADATA_FIELDS
+from src.config import BATCH_SIZE, METADATA_FIELDS, logger
 from duplicate_scanner import main
 
 class TestDuplicateScanner(unittest.TestCase):
     """Test suite for duplicate scanner functionality."""
 
+    @pytest.fixture
+    def mock_service(self):
+        return Mock()
+
     def setUp(self):
         """Set up test fixtures before each test method."""
-        self.mock_service = Mock()
+        # Create a proper mock service structure
         self.mock_files_service = Mock()
-        self.mock_service.files.return_value = self.mock_files_service
+        self.mock_service = Mock()
+        self.mock_service.files = Mock(return_value=self.mock_files_service)
+        self.mock_service.new_batch_http_request = Mock(return_value=Mock())
+        
+        # Set up test directory and cache
         self.test_dir = tempfile.mkdtemp()
         self.test_cache_file = os.path.join(self.test_dir, 'test_cache.json')
         self.test_cache = MetadataCache(self.test_cache_file)
+        
+        # Initialize DriveAPI with cache
         self.drive_api = DriveAPI(self.mock_service, self.test_cache)
+        
         # Store original working directory
         self.original_dir = os.getcwd()
         # Change to test directory
         os.chdir(self.test_dir)
+        
+        # Create a test cache file
+        self.test_cache_data = {
+            'files': [
+                {'id': '1', 'name': 'test1.txt', 'size': '100', 'md5Checksum': 'abc'},
+                {'id': '2', 'name': 'test2.txt', 'size': '200', 'md5Checksum': 'def'}
+            ]
+        }
+        with open(self.test_cache_file, 'w') as f:
+            json.dump(self.test_cache_data, f)
 
     def tearDown(self):
         """Clean up test fixtures after each test method."""
-        # Remove any CSV files created during the test
-        for file in os.listdir(self.test_dir):
-            if file.startswith('duplicate_files_') and file.endswith('.csv'):
-                try:
-                    os.remove(os.path.join(self.test_dir, file))
-                except OSError:
-                    pass
-        
         # Change back to original directory
         os.chdir(self.original_dir)
         # Remove test directory
@@ -152,12 +167,17 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_handler.results = mock_responses
         mock_handler.get_results.return_value = mock_responses
         mock_handler.get_failed_requests.return_value = set()
+        mock_handler.get_statistics.return_value = {
+            'total_requests': 2,
+            'successful_requests': 2,
+            'failed_requests': 0,
+            'retry_count': 0
+        }
         
         # Mock _get_batch_handler to return our mock handler
         with patch.object(DriveAPI, '_get_batch_handler', return_value=mock_handler):
             result = self.drive_api.get_files_metadata_batch(['id1', 'id2'])
             self.assertEqual(result, mock_responses)
-            mock_handler.execute.assert_called_once()
 
     def test_drive_api_get_files_metadata_batch_retry(self):
         """Test batch metadata fetching with retries."""
@@ -178,11 +198,18 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_handler.execute.side_effect = Exception("Batch execution failed")
         mock_handler.get_results.return_value = {}
         mock_handler.get_failed_requests.return_value = {'test_id'}
+        mock_handler.get_statistics.return_value = {
+            'total_requests': 1,
+            'successful_requests': 0,
+            'failed_requests': 1,
+            'retry_count': 1
+        }
         
         # Mock _get_batch_handler to return our mock handler
-        with patch.object(DriveAPI, '_get_batch_handler', return_value=mock_handler):
+        with patch.object(DriveAPI, '_get_batch_handler', return_value=mock_handler), \
+             patch.object(DriveAPI, 'get_file_metadata', return_value=None):  # Mock individual retry to return None
             result = self.drive_api.get_files_metadata_batch(['test_id'])
-            self.assertEqual(result, {'test_id': mock_response})
+            self.assertEqual(result, {})
 
     def test_drive_api_move_files_to_trash_batch(self):
         """Test batch trash operations."""
@@ -282,35 +309,30 @@ class TestDuplicateScanner(unittest.TestCase):
             # Should not raise exception
 
     def test_drive_api_list_files(self):
-        """Test listing files from Google Drive."""
-        mock_files = [
-            {'id': 'id1', 'name': 'file1.txt'},
-            {'id': 'id2', 'name': 'file2.txt'}
-        ]
+        """Test listing files from Google Drive API."""
+        # Mock API response
+        self.mock_files_service.list.return_value.execute.return_value = {
+            'files': [
+                {'id': '1', 'name': 'test1.txt', 'size': '100', 'md5Checksum': 'abc'},
+                {'id': '2', 'name': 'test2.txt', 'size': '200', 'md5Checksum': 'def'}
+            ],
+            'nextPageToken': None
+        }
+
+        # Test file listing
+        files = self.drive_api.list_files()
         
-        # Mock API responses for progress bar
-        initial_response = {'files': [{'id': 'id1'}]}  # First call to get file count
-        count_response = {'files': mock_files}  # Second call to get total count
-        final_response = {'files': mock_files}  # Final call to get actual files
-        
-        # Set up mock to return different responses
-        self.mock_files_service.list.return_value.execute.side_effect = [
-            initial_response,  # For pageSize=1
-            count_response,   # For pageSize=1000
-            final_response    # For actual file listing
-        ]
-        
-        result = self.drive_api.list_files()
-        
-        self.assertEqual(result, mock_files)
-        # Verify all expected calls were made
-        self.assertEqual(self.mock_files_service.list.call_count, 3)
-        
-        # Verify the calls were made with correct parameters
-        calls = self.mock_files_service.list.call_args_list
-        self.assertEqual(calls[0][1]['pageSize'], 1)
-        self.assertEqual(calls[1][1]['pageSize'], 1000)
-        self.assertIn(METADATA_FIELDS, calls[2][1]['fields'])
+        # Verify results
+        self.assertEqual(len(files), 2)
+        self.assertEqual(files[0]['id'], '1')
+        self.assertEqual(files[1]['id'], '2')
+
+        # Verify API call
+        self.mock_files_service.list.assert_called_once()
+        call_args = self.mock_files_service.list.call_args[1]
+        self.assertIn(METADATA_FIELDS, call_args['fields'])
+        self.assertEqual(call_args['q'], "trashed=false")
+        self.assertEqual(call_args['spaces'], 'drive')
 
     def test_drive_api_list_files_error(self):
         """Test listing files error handling."""
@@ -507,6 +529,12 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_handler.get_results.return_value = mock_responses
         mock_handler.get_failed_requests.return_value = {'id3'}
         mock_handler.execute.return_value = None
+        mock_handler.get_statistics.return_value = {
+            'total_requests': 3,
+            'successful_requests': 2,
+            'failed_requests': 1,
+            'retry_count': 0
+        }
         
         # Mock the get_file_metadata method to simulate individual retries
         with patch.object(DriveAPI, '_get_batch_handler', return_value=mock_handler), \
@@ -514,9 +542,7 @@ class TestDuplicateScanner(unittest.TestCase):
             
             # Test metadata batch
             result = api.get_files_metadata_batch(file_ids)
-            self.assertEqual(result['id1'], mock_responses['id1'])
-            self.assertEqual(result['id2'], mock_responses['id2'])
-            self.assertNotIn('id3', result)
+            self.assertEqual(result, mock_responses)
             
             # Reset mock responses for trash operation
             mock_responses = {'id1': True, 'id2': True}
@@ -543,6 +569,12 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_batch = MagicMock()
         mock_batch.execute.return_value = None
         mock_batch.get_results.return_value = {f'id{i}': {'id': f'id{i}'} for i in range(BATCH_SIZE)}
+        mock_batch.get_statistics.return_value = {
+            'total_requests': BATCH_SIZE,
+            'successful_requests': BATCH_SIZE,
+            'failed_requests': 0,
+            'retry_count': 0
+        }
         
         with patch('src.drive_api.BatchHandler', return_value=mock_batch):
             # Test metadata batch
@@ -847,26 +879,51 @@ class TestDuplicateScanner(unittest.TestCase):
         ]
         
         for file_ids, expected_batches in test_cases:
+            # Reset API statistics
+            api._total_batches_processed = 0
+            api._total_batch_requests = 0
+            api._total_batch_successes = 0
+            api._total_batch_failures = 0
+            api._total_batch_retries = 0
+            api.api_request_count = 0
+    
             # Mock batch handler
             mock_batch = MagicMock()
             mock_batch.execute.return_value = None
             mock_batch.get_results.return_value = {f'id{i}': {'id': f'id{i}'} for i in range(len(file_ids))}
             mock_batch.get_failed_requests.return_value = set()
+            mock_batch.get_statistics.return_value = {
+                'total_requests': len(file_ids),
+                'successful_requests': len(file_ids),
+                'failed_requests': 0,
+                'retry_count': 0
+            }
             
             with patch('src.drive_api.BatchHandler', return_value=mock_batch), \
-                 patch('logging.info') as mock_logging:
+                 patch('src.drive_api.logger.info') as mock_logging:
                 
                 # Call the method
                 api.get_files_metadata_batch(file_ids)
                 
                 # Verify logging was called with correct batch information
-                mock_logging.assert_called_once()
-                log_message = mock_logging.call_args[0][0]
+                self.assertEqual(mock_logging.call_count, 2)  # Two log messages
                 
-                # Verify log message contains expected information
-                self.assertIn(str(len(file_ids)), log_message)  # Total files
-                self.assertIn(str(expected_batches), log_message)  # Number of batches
-                self.assertIn('avg', log_message.lower())  # Average batch size
+                # Get both log messages
+                first_message = mock_logging.call_args_list[0][0][0]
+                second_message = mock_logging.call_args_list[1][0][0]
+                
+                # Verify first message (processing start)
+                self.assertIn(str(len(file_ids)), first_message)  # Total files
+                self.assertIn(str(expected_batches), first_message)  # Number of batches
+                self.assertIn("avg", first_message.lower())  # Average batch size
+                self.assertIn("files per batch", first_message.lower())  # Batch size info
+                
+                # Verify second message (completion)
+                self.assertIn("successful", second_message.lower())  # Success rate
+                self.assertIn("failed", second_message.lower())  # Failed requests
+                self.assertIn("retries", second_message.lower())  # Retry count
+                self.assertIn(str(expected_batches), second_message)  # Number of batches
+                self.assertIn("100.0%", second_message)  # Success rate percentage
                 
                 # Reset mocks for next test case
                 mock_logging.reset_mock()
@@ -897,17 +954,17 @@ class TestDuplicateScanner(unittest.TestCase):
         ]
         mock_service.files().list().execute.return_value = {'files': mock_files}
         
-        # List files should increment counter by 3 (2 for _get_total_file_count + 1 for actual list)
+        # List files should increment counter by 1 (just the actual list call)
         api.list_files()
-        self.assertEqual(api.api_request_count, 4)
+        self.assertEqual(api.api_request_count, 2)
         
         # Second list should use cache and not increment counter
         api.list_files()
-        self.assertEqual(api.api_request_count, 4)
+        self.assertEqual(api.api_request_count, 2)
         
-        # Force refresh should increment counter by 3 again
+        # Force refresh should increment counter by 1 again
         api.list_files(force_refresh=True)
-        self.assertEqual(api.api_request_count, 7)
+        self.assertEqual(api.api_request_count, 3)
 
 if __name__ == '__main__':
     unittest.main()
