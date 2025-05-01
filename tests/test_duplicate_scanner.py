@@ -851,6 +851,7 @@ class TestDuplicateScanner(unittest.TestCase):
             mock_batch = MagicMock()
             mock_batch.execute.return_value = None
             mock_batch.get_results.return_value = {f'id{i}': {'id': f'id{i}'} for i in range(len(file_ids))}
+            mock_batch.get_failed_requests.return_value = set()
             
             with patch('src.drive_api.BatchHandler', return_value=mock_batch), \
                  patch('logging.info') as mock_logging:
@@ -867,8 +868,9 @@ class TestDuplicateScanner(unittest.TestCase):
                 self.assertIn(str(expected_batches), log_message)  # Number of batches
                 self.assertIn('avg', log_message.lower())  # Average batch size
                 
-                # Reset mock for next test case
+                # Reset mocks for next test case
                 mock_logging.reset_mock()
+                mock_batch.reset_mock()
 
 if __name__ == '__main__':
     unittest.main()
