@@ -208,10 +208,12 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
         ]
         self.cache.get_all_files.return_value = test_files
         self.cache.get_all_folders.return_value = test_folders
+        self.drive_api.list_files.return_value = test_files
         
         self.scanner.scan()
         self.assertEqual(len(self.scanner.duplicate_groups), 1)
         self.assertEqual(len(self.scanner.duplicate_files_in_folders), 1)
+        self.assertEqual(len(self.scanner.duplicate_only_folders), 1)
         self.cache.get_all_files.assert_called_once()
         self.cache.get_all_folders.assert_called_once()
         self.drive_api.list_all_files_and_folders.assert_not_called()
@@ -228,10 +230,12 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
         self.cache.get_all_files.return_value = None
         self.cache.get_all_folders.return_value = None
         self.drive_api.list_all_files_and_folders.return_value = (test_files, test_folders)
+        self.drive_api.list_files.return_value = test_files
         
         self.scanner.scan()
         self.assertEqual(len(self.scanner.duplicate_groups), 1)
         self.assertEqual(len(self.scanner.duplicate_files_in_folders), 1)
+        self.assertEqual(len(self.scanner.duplicate_only_folders), 1)
         self.cache.get_all_files.assert_called_once()
         self.cache.get_all_folders.assert_called_once()
         self.drive_api.list_all_files_and_folders.assert_called_once()
@@ -243,6 +247,14 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
             {'id': 'folder1', 'name': 'Test Folder 1'},
             {'id': 'folder2', 'name': 'Test Folder 2'}
         ]
+        
+        # Create test files
+        test_files = [
+            {'id': '1', 'parents': ['folder1']},
+            {'id': '2', 'parents': ['folder2']},
+            {'id': '3', 'parents': ['folder1']}  # Additional file in folder1
+        ]
+        self.drive_api.list_files.return_value = test_files
         
         # Create duplicate groups that reference these folders
         self.scanner.duplicate_groups = [
@@ -262,6 +274,18 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
         self.assertEqual(len(self.scanner.duplicate_files_in_folders), 2)
         self.assertIn('folder1', self.scanner.duplicate_files_in_folders)
         self.assertIn('folder2', self.scanner.duplicate_files_in_folders)
+        
+        # Verify folder1 has mixed content
+        folder1 = self.scanner.duplicate_files_in_folders['folder1']
+        self.assertEqual(len(folder1.duplicate_files), 1)
+        self.assertEqual(len(folder1.total_files), 2)
+        self.assertFalse(folder1.check_if_duplicate_only())
+        
+        # Verify folder2 has only duplicates
+        folder2 = self.scanner.duplicate_files_in_folders['folder2']
+        self.assertEqual(len(folder2.duplicate_files), 1)
+        self.assertEqual(len(folder2.total_files), 1)
+        self.assertTrue(folder2.check_if_duplicate_only())
 
     def test_duplicate_only_folders(self):
         """Test identification of folders containing only duplicate files."""
@@ -297,6 +321,109 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
         self.assertTrue(folder1.check_if_duplicate_only())
         
         # Verify folder2
+        folder2 = self.scanner.duplicate_only_folders['folder2']
+        self.assertEqual(len(folder2.duplicate_files), 2)
+        self.assertEqual(len(folder2.total_files), 2)
+        self.assertTrue(folder2.check_if_duplicate_only())
+
+    def test_duplicate_only_folders_mixed_content(self):
+        """Test identification of folders with mixed content (some duplicates, some unique files)."""
+        # Setup test data with mixed content
+        test_files = [
+            {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']},
+            {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']},
+            {'id': '3', 'size': '200', 'md5Checksum': 'unique1', 'mimeType': 'text/plain', 'parents': ['folder1']},
+            {'id': '4', 'size': '300', 'md5Checksum': 'def456', 'mimeType': 'text/plain', 'parents': ['folder2']},
+            {'id': '5', 'size': '300', 'md5Checksum': 'def456', 'mimeType': 'text/plain', 'parents': ['folder2']}
+        ]
+        test_folders = [
+            {'id': 'folder1', 'name': 'Mixed Content Folder'},
+            {'id': 'folder2', 'name': 'Duplicate Only Folder'}
+        ]
+        
+        # Mock API responses
+        self.drive_api.list_files.return_value = test_files
+        self.cache.get_all_files.return_value = test_files
+        self.cache.get_all_folders.return_value = test_folders
+        
+        # Run scan
+        self.scanner.scan()
+        
+        # Verify results
+        self.assertEqual(len(self.scanner.duplicate_groups), 2)  # Two groups of duplicates
+        self.assertEqual(len(self.scanner.duplicate_files_in_folders), 2)  # Both folders have duplicates
+        self.assertEqual(len(self.scanner.duplicate_only_folders), 1)  # Only folder2 contains only duplicates
+        
+        # Verify folder1 (mixed content)
+        folder1 = self.scanner.duplicate_files_in_folders['folder1']
+        self.assertEqual(len(folder1.duplicate_files), 2)
+        self.assertEqual(len(folder1.total_files), 3)
+        self.assertFalse(folder1.check_if_duplicate_only())
+        
+        # Verify folder2 (duplicate only)
+        folder2 = self.scanner.duplicate_only_folders['folder2']
+        self.assertEqual(len(folder2.duplicate_files), 2)
+        self.assertEqual(len(folder2.total_files), 2)
+        self.assertTrue(folder2.check_if_duplicate_only())
+
+    def test_duplicate_only_folders_empty(self):
+        """Test behavior with empty folders."""
+        test_files = [
+            {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']},
+            {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']}
+        ]
+        test_folders = [
+            {'id': 'folder1', 'name': 'Test Folder 1'},
+            {'id': 'folder2', 'name': 'Empty Folder'}
+        ]
+        
+        # Mock API responses
+        self.drive_api.list_files.return_value = test_files
+        self.cache.get_all_files.return_value = test_files
+        self.cache.get_all_folders.return_value = test_folders
+        
+        # Run scan
+        self.scanner.scan()
+        
+        # Verify results
+        self.assertEqual(len(self.scanner.duplicate_groups), 1)
+        self.assertEqual(len(self.scanner.duplicate_files_in_folders), 1)
+        self.assertEqual(len(self.scanner.duplicate_only_folders), 1)
+        self.assertNotIn('folder2', self.scanner.duplicate_files_in_folders)
+        self.assertNotIn('folder2', self.scanner.duplicate_only_folders)
+
+    def test_duplicate_only_folders_multiple_parents(self):
+        """Test behavior with files that have multiple parent folders."""
+        test_files = [
+            {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1', 'folder2']},
+            {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1', 'folder2']},
+            {'id': '3', 'size': '200', 'md5Checksum': 'unique1', 'mimeType': 'text/plain', 'parents': ['folder1']}
+        ]
+        test_folders = [
+            {'id': 'folder1', 'name': 'Mixed Content Folder'},
+            {'id': 'folder2', 'name': 'Duplicate Only Folder'}
+        ]
+        
+        # Mock API responses
+        self.drive_api.list_files.return_value = test_files
+        self.cache.get_all_files.return_value = test_files
+        self.cache.get_all_folders.return_value = test_folders
+        
+        # Run scan
+        self.scanner.scan()
+        
+        # Verify results
+        self.assertEqual(len(self.scanner.duplicate_groups), 1)
+        self.assertEqual(len(self.scanner.duplicate_files_in_folders), 2)
+        self.assertEqual(len(self.scanner.duplicate_only_folders), 1)
+        
+        # Verify folder1 (mixed content)
+        folder1 = self.scanner.duplicate_files_in_folders['folder1']
+        self.assertEqual(len(folder1.duplicate_files), 2)
+        self.assertEqual(len(folder1.total_files), 3)
+        self.assertFalse(folder1.check_if_duplicate_only())
+        
+        # Verify folder2 (duplicate only)
         folder2 = self.scanner.duplicate_only_folders['folder2']
         self.assertEqual(len(folder2.duplicate_files), 2)
         self.assertEqual(len(folder2.total_files), 2)
