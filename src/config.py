@@ -42,8 +42,8 @@ CSV_HEADERS = [
 ]
 
 # Cache settings
-CACHE_FILE = 'drive_metadata_cache.json'
-SAVE_INTERVAL_MINUTES = 5  # Save every 5 minutes if modified
+CACHE_FILE = 'cache.json'
+SAVE_INTERVAL_MINUTES = 1  # Save cache every minute
 
 # API settings
 BATCH_SIZE = 100  # Reduced from 900 to 100 to stay well under Google's limits
