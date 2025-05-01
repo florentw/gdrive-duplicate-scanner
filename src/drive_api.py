@@ -23,7 +23,7 @@ class DriveAPI:
     def _get_batch_handler(self) -> BatchHandler:
         """Get a new batch handler instance."""
         if not self.batch_handler:
-            self.batch_handler = BatchHandler(self.service, self.cache)
+            self.batch_handler = BatchHandler(self.service, self.cache, self._increment_request_count)
         return self.batch_handler
 
     def _increment_request_count(self) -> None:

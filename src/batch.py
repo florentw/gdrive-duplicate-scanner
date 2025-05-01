@@ -11,9 +11,10 @@ from config import BATCH_SIZE, MAX_RETRIES, RETRY_DELAY, logger
 class BatchHandler:
     """Handles batch requests to Google Drive API."""
     
-    def __init__(self, service: Resource, cache: MetadataCache):
+    def __init__(self, service: Resource, cache: MetadataCache, increment_request_count: Callable[[], None]):
         self.service = service
         self.cache = cache
+        self.increment_request_count = increment_request_count
         self.batch = None
         self.results: Dict[str, Dict] = {}
         self._failed_requests: Set[str] = set()
@@ -92,6 +93,8 @@ class BatchHandler:
             try:
                 logger.debug(f"Executing batch with {self._request_count} requests (Attempt {attempt + 1}/{MAX_RETRIES})")
                 self.batch.execute()
+                # Count this as a single API request since it's a batch
+                self.increment_request_count()
                 break
             except Exception as e:
                 self._retry_count += 1

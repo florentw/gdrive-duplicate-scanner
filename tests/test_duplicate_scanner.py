@@ -426,7 +426,8 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_service = MagicMock()
         mock_batch = MagicMock()
         mock_service.new_batch_http_request.return_value = mock_batch
-        handler = BatchHandler(mock_service, self.test_cache)
+        mock_increment = MagicMock()
+        handler = BatchHandler(mock_service, self.test_cache, mock_increment)
         
         # Test adding requests
         file_ids = ['id1', 'id2', 'id3']
@@ -437,6 +438,7 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_batch.execute.return_value = None
         handler.execute()
         mock_batch.execute.assert_called_once()
+        mock_increment.assert_called_once()  # Verify API request was counted
         
         # Test callback behavior
         for file_id in file_ids[:2]:  # First two succeed
@@ -465,7 +467,8 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_service = MagicMock()
         mock_batch = MagicMock()
         mock_service.new_batch_http_request.return_value = mock_batch
-        handler = BatchHandler(mock_service, self.test_cache)
+        mock_increment = MagicMock()
+        handler = BatchHandler(mock_service, self.test_cache, mock_increment)
         
         # Add a request
         handler.add_metadata_request('test_id')
@@ -480,6 +483,7 @@ class TestDuplicateScanner(unittest.TestCase):
         # Execute batch and verify retries
         handler.execute()
         self.assertEqual(mock_batch.execute.call_count, 3)
+        mock_increment.assert_called_once()  # Should only increment once on final success
 
     def test_batch_handler_cache_interaction(self):
         """Test BatchHandler cache interaction."""
@@ -487,7 +491,8 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_service = MagicMock()
         mock_batch = MagicMock()
         mock_service.new_batch_http_request.return_value = mock_batch
-        handler = BatchHandler(mock_service, self.test_cache)
+        mock_increment = MagicMock()
+        handler = BatchHandler(mock_service, self.test_cache, mock_increment)
         
         # Test metadata request with cache
         file_id = 'test_id'
@@ -972,7 +977,8 @@ class TestDuplicateScanner(unittest.TestCase):
         mock_service = MagicMock()
         mock_batch = MagicMock()
         mock_service.new_batch_http_request.return_value = mock_batch
-        handler = BatchHandler(mock_service, self.test_cache)
+        mock_increment = MagicMock()
+        handler = BatchHandler(mock_service, self.test_cache, mock_increment)
         
         # Add some requests
         file_ids = ['id1', 'id2', 'id3']
@@ -989,10 +995,12 @@ class TestDuplicateScanner(unittest.TestCase):
         # Verify retry attempts
         self.assertEqual(mock_batch.execute.call_count, MAX_RETRIES)
         self.assertEqual(handler._retry_count, MAX_RETRIES)
+        mock_increment.assert_not_called()  # Should not increment on failure
         
         # Test partial batch failure
         mock_batch.execute.reset_mock()
         mock_batch.execute.side_effect = None
+        mock_increment.reset_mock()
         
         # Simulate some failed callbacks
         for file_id in file_ids[:2]:  # First two succeed
@@ -1002,6 +1010,10 @@ class TestDuplicateScanner(unittest.TestCase):
         # Last one fails
         error_callback = mock_batch.add.call_args_list[2][1]['callback']
         error_callback('id3', None, Exception("API Error"))
+        
+        # Execute batch
+        handler.execute()
+        mock_increment.assert_called_once()  # Should increment on successful batch execution
         
         # Verify error handling
         self.assertEqual(len(handler.get_failed_requests()), 1)
