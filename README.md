@@ -30,7 +30,7 @@ It uses Google Drive API v3 for accessing and modifying files.
 #### Caching System
 - Implements a smart caching system to reduce API calls
 - Cache expires after 24 hours by default
-- Saves cache every 5 minutes if modified
+- Saves cache every 1 minute if modified
 - Handles cache invalidation for trashed files
 
 #### Folder Analysis
@@ -113,7 +113,7 @@ The script maintains a cache of file metadata to improve performance and reduce 
 - Persists between runs in `drive_metadata_cache.json`
 - Is automatically invalidated when Google credentials change
 - Can be manually refreshed using the `--refresh-cache` argument
-- Is saved every 5 minutes when modified
+- Is saved every 1 minute when modified
 - Uses atomic writes to prevent corruption
 
 ### Delete Behavior
