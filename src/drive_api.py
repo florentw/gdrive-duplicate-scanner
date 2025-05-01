@@ -3,7 +3,7 @@ from typing import List, Dict, Optional, Any
 from googleapiclient.discovery import Resource
 from cache import MetadataCache
 from batch import BatchHandler
-from config import BATCH_SIZE, METADATA_FIELDS
+from config import BATCH_SIZE, METADATA_FIELDS, logger
 from tqdm import tqdm
 
 class DriveAPI:
@@ -14,6 +14,11 @@ class DriveAPI:
         self.cache = cache or MetadataCache()
         self.batch_handler = None
         self.api_request_count = 0  # Add counter for API requests
+        self._total_batches_processed = 0
+        self._total_batch_requests = 0
+        self._total_batch_successes = 0
+        self._total_batch_failures = 0
+        self._total_batch_retries = 0
 
     def _get_batch_handler(self) -> BatchHandler:
         """Get a new batch handler instance."""
@@ -24,6 +29,25 @@ class DriveAPI:
     def _increment_request_count(self) -> None:
         """Increment the API request counter."""
         self.api_request_count += 1
+
+    def _update_batch_statistics(self, stats: Dict[str, int]) -> None:
+        """Update batch operation statistics."""
+        self._total_batch_requests += stats['total_requests']
+        self._total_batch_successes += stats['successful_requests']
+        self._total_batch_failures += stats['failed_requests']
+        self._total_batch_retries += stats['retry_count']
+        self._total_batches_processed += 1
+
+    def get_batch_statistics(self) -> Dict[str, int]:
+        """Get overall batch operation statistics."""
+        return {
+            'total_batches': self._total_batches_processed,
+            'total_requests': self._total_batch_requests,
+            'successful_requests': self._total_batch_successes,
+            'failed_requests': self._total_batch_failures,
+            'retry_count': self._total_batch_retries,
+            'total_api_requests': self.api_request_count
+        }
 
     def _get_total_file_count(self) -> int:
         """Get total number of files in Google Drive."""
@@ -169,9 +193,12 @@ class DriveAPI:
         batch_handler = self._get_batch_handler()
         total_files = len(remaining_ids)
         total_batches = (total_files + BATCH_SIZE - 1) // BATCH_SIZE
-        avg_batch_size = total_files / total_batches
+        avg_batch_size = total_files / total_batches if total_batches > 0 else 0
         
-        logging.info(f"Processing {total_files} files in {total_batches} batches (avg {avg_batch_size:.1f} files per batch, {self.api_request_count} API requests so far)")
+        logger.info(
+            f"Processing {total_files} files in {total_batches} batches "
+            f"(avg {avg_batch_size:.1f} files per batch, {self.api_request_count} API requests so far)"
+        )
         
         for i in range(0, len(remaining_ids), BATCH_SIZE):
             batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
@@ -182,6 +209,19 @@ class DriveAPI:
             
             # Process batch results
             self._process_batch_results(batch_handler, batch_ids, results)
+            
+            # Update statistics
+            self._update_batch_statistics(batch_handler.get_statistics())
+
+        # Log final batch statistics
+        stats = self.get_batch_statistics()
+        success_rate = (stats['successful_requests'] / stats['total_requests'] * 100) if stats['total_requests'] > 0 else 0
+        logger.info(
+            f"Batch operations completed: {stats['total_batches']} batches, "
+            f"{stats['successful_requests']}/{stats['total_requests']} successful ({success_rate:.1f}%), "
+            f"{stats['failed_requests']} failed, {stats['retry_count']} retries, "
+            f"{stats['total_api_requests']} total API requests"
+        )
 
         return results
 

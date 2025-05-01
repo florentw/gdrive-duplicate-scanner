@@ -165,7 +165,7 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
         print(f"Total duplicate files: {total_duplicates}")
         print(f"Total wasted space: {wasted_gb:.2f} GB")
         print(f"Found {len(self.duplicate_files_in_folders)} folders with duplicate files")
-        print(f"Found {len(self.duplicate_only_folders)} folders containing only duplicate files")
+        print(f"Found {len(self.duplicate_only_folders)} folders containing only duplicate files\n")
 
     def _analyze_folder_structures(self, folders: List[Dict]) -> None:
         """Analyze folder structures to identify folders containing duplicate files."""
