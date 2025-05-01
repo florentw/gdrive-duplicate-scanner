@@ -73,7 +73,7 @@ class DriveAPI:
         page_token = None
         total_count = self._get_total_file_count()
         
-        with tqdm(total=total_count, desc="Listing files", unit="file") as pbar:
+        with tqdm(total=total_count, desc="Scanning Drive", unit="file") as pbar:
             while True:
                 new_files, page_token = self._fetch_files_page(page_token)
                 files.extend(new_files)
@@ -123,7 +123,7 @@ class DriveAPI:
 
         # Process remaining files in batches
         batch_handler = self._get_batch_handler()
-        with tqdm(total=len(remaining_ids), desc="Fetching metadata", unit="file") as pbar:
+        with tqdm(total=len(remaining_ids), desc="Loading file details", unit="file") as pbar:
             for i in range(0, len(remaining_ids), BATCH_SIZE):
                 batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
                 
