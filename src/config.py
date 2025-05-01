@@ -1,13 +1,31 @@
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 
 # Configure logging
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
-logging.basicConfig(filename='drive_scanner.log', level=logging.INFO, format=LOG_FORMAT)
+LOG_FILE = 'drive_scanner.log'
+MAX_LOG_SIZE = 5 * 1024 * 1024  # 5MB
+BACKUP_COUNT = 3  # Keep 3 backup files
+
+# Create rotating file handler
+file_handler = RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=MAX_LOG_SIZE,
+    backupCount=BACKUP_COUNT
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+
+# Create console handler
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+
+# Configure root logger
 logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 # Google Drive API scopes

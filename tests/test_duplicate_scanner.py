@@ -552,10 +552,10 @@ class TestDuplicateScanner(unittest.TestCase):
         
         # Mock DriveAPI
         mock_drive_api = MagicMock()
-        mock_drive_api.get_file_metadata.side_effect = lambda x: {
+        mock_drive_api.get_files_metadata_batch.return_value = {
             'folder1': {'id': 'folder1', 'name': 'Folder 1'},
             'folder2': {'id': 'folder2', 'name': 'Folder 2'}
-        }.get(x, {})
+        }
         
         # Test CSV export
         filename = write_to_csv(groups, mock_drive_api)
@@ -569,7 +569,7 @@ class TestDuplicateScanner(unittest.TestCase):
             reader = csv.DictReader(f)
             rows = list(reader)
             
-            # Should have 2 rows (each file compared with the other)
+            # Should have 2 rows (one for each file)
             self.assertEqual(len(rows), 2)
             
             # Verify first row
@@ -650,6 +650,146 @@ class TestDuplicateScanner(unittest.TestCase):
             
             # Verify CSV export was called with the duplicate groups
             self.assertTrue(mock_write_csv.called)
+
+    def test_write_to_csv_optimized(self):
+        """Test the optimized CSV export functionality."""
+        # Create test data with multiple duplicates
+        files = [
+            {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'parents': ['folder1']},
+            {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'parents': ['folder2']},
+            {'id': 'id3', 'name': 'file3.txt', 'size': '1024', 'parents': ['folder3']}
+        ]
+        metadata = {
+            'id1': {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'parents': ['folder1'], 'md5Checksum': 'abc123'},
+            'id2': {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'parents': ['folder2'], 'md5Checksum': 'abc123'},
+            'id3': {'id': 'id3', 'name': 'file3.txt', 'size': '1024', 'parents': ['folder3'], 'md5Checksum': 'abc123'}
+        }
+        group = DuplicateGroup(files, metadata)
+        
+        # Mock parent folder metadata
+        folder_metadata = {
+            'folder1': {'id': 'folder1', 'name': 'Folder 1'},
+            'folder2': {'id': 'folder2', 'name': 'Folder 2'},
+            'folder3': {'id': 'folder3', 'name': 'Folder 3'}
+        }
+        
+        # Mock DriveAPI
+        mock_drive_api = MagicMock()
+        mock_drive_api.get_files_metadata_batch.return_value = folder_metadata
+        
+        # Test CSV export
+        filename = write_to_csv([group], mock_drive_api)
+        
+        # Verify file was created
+        self.assertIsNotNone(filename)
+        self.assertTrue(os.path.exists(filename))
+        
+        # Verify CSV content
+        with open(filename, 'r') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            
+            # Should have 3 rows (one for each file)
+            self.assertEqual(len(rows), 3)
+            
+            # Verify first row
+            self.assertEqual(rows[0]['File Name'], 'file1.txt')
+            self.assertEqual(rows[0]['Parent Folder'], 'Folder 1')
+            self.assertEqual(rows[0]['MD5 Checksum'], 'abc123')
+            self.assertEqual(rows[0]['Size (Bytes)'], '1024')
+            
+            # Verify duplicates are properly joined
+            duplicate_names = rows[0]['Duplicate File Name'].split('; ')
+            self.assertEqual(len(duplicate_names), 2)
+            self.assertIn('file2.txt', duplicate_names)
+            self.assertIn('file3.txt', duplicate_names)
+            
+            # Verify paths are properly joined
+            duplicate_paths = rows[0]['Duplicate File Path'].split('; ')
+            self.assertEqual(len(duplicate_paths), 2)
+            self.assertIn('Folder 2/file2.txt', duplicate_paths)
+            self.assertIn('Folder 3/file3.txt', duplicate_paths)
+        
+        # Cleanup
+        os.remove(filename)
+
+    def test_write_to_csv_with_missing_metadata(self):
+        """Test CSV export with missing metadata."""
+        # Create test data with missing metadata
+        files = [
+            {'id': 'id1', 'name': 'file1.txt', 'size': '1024'},
+            {'id': 'id2', 'name': 'file2.txt', 'size': '1024'}
+        ]
+        metadata = {
+            'id1': {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'md5Checksum': 'abc123'}
+            # id2 metadata is missing
+        }
+        group = DuplicateGroup(files, metadata)
+        
+        # Mock DriveAPI
+        mock_drive_api = MagicMock()
+        mock_drive_api.get_files_metadata_batch.return_value = {}
+        
+        # Test CSV export
+        filename = write_to_csv([group], mock_drive_api)
+        
+        # Verify file was created
+        self.assertIsNotNone(filename)
+        self.assertTrue(os.path.exists(filename))
+        
+        # Verify CSV content
+        with open(filename, 'r') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            
+            # Should have 1 row (only for file1.txt)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['File Name'], 'file1.txt')
+            self.assertEqual(rows[0]['Duplicate File Name'], '')  # No duplicates due to missing metadata
+        
+        # Cleanup
+        os.remove(filename)
+
+    def test_write_to_csv_with_empty_groups(self):
+        """Test CSV export with empty duplicate groups."""
+        # Create empty group
+        group = DuplicateGroup([], {})
+        
+        # Mock DriveAPI
+        mock_drive_api = MagicMock()
+        
+        # Test CSV export
+        filename = write_to_csv([group], mock_drive_api)
+        
+        # Verify file was created
+        self.assertIsNotNone(filename)
+        self.assertTrue(os.path.exists(filename))
+        
+        # Verify CSV content
+        with open(filename, 'r') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            
+            # Should have 0 rows
+            self.assertEqual(len(rows), 0)
+        
+        # Cleanup
+        os.remove(filename)
+
+    def test_write_to_csv_file_error(self):
+        """Test CSV export error handling."""
+        # Create test data
+        files = [{'id': 'id1', 'name': 'file1.txt', 'size': '1024'}]
+        metadata = {'id1': {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'md5Checksum': 'abc123'}}
+        group = DuplicateGroup(files, metadata)
+        
+        # Mock DriveAPI
+        mock_drive_api = MagicMock()
+        
+        # Mock file system error
+        with patch('builtins.open', side_effect=IOError("File error")):
+            result = write_to_csv([group], mock_drive_api)
+            self.assertIsNone(result)
 
 if __name__ == '__main__':
     unittest.main()
