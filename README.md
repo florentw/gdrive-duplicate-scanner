@@ -58,8 +58,8 @@ The author will not be held responsible for any data loss that may occur as a re
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/moraneus/G-Drive-Remove-Duplicates.git
-cd G-Drive-Remove-Duplicates
+git clone https://github.com/florentw/gdrive-duplicate-scanner.git
+cd gdrive-duplicate-scanner
 ```
 
 2. Install the package in development mode:
@@ -174,4 +174,15 @@ After you have finished using the application, it is recommended to perform the 
 7. Delete the cache file (`drive_metadata_cache.json`) if you want to remove all cached data.
 
 By following these cleanup instructions, you can ensure that the application no longer has access to your Google Account and that any test user permissions are removed.
+
+## About
+
+This project is a complete rewrite of [moraneus/G-Drive-Remove-Duplicates](https://github.com/moraneus/G-Drive-Remove-Duplicates.git), with significant improvements in:
+- Code organization and maintainability
+- Performance optimization
+- Test coverage
+- Error handling
+- Logging system
+- Documentation
+- CI/CD integration
 
