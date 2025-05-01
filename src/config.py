@@ -17,11 +17,17 @@ console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(LOG_LEVEL)
 console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
 
-# Configure root logger
+# Configure root logger to only show warnings and above
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.WARNING)
+
+# Configure drive_scanner logger
 logger = logging.getLogger('drive_scanner')
 logger.setLevel(LOG_LEVEL)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
+# Prevent propagation to root logger to avoid duplicate messages
+logger.propagate = False
 
 # Set external library loggers to WARNING level
 logging.getLogger('googleapiclient').setLevel(logging.WARNING)
