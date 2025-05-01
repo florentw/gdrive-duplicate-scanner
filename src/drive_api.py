@@ -20,6 +20,48 @@ class DriveAPI:
             self.batch_handler = BatchHandler(self.service, self.cache)
         return self.batch_handler
 
+    def _get_total_file_count(self) -> int:
+        """Get total number of files in Google Drive."""
+        try:
+            initial_response = self.service.files().list(
+                q="trashed=false",
+                spaces='drive',
+                fields='nextPageToken, files(id)',
+                pageSize=1
+            ).execute()
+            
+            if not initial_response.get('files'):
+                return 0
+                
+            # Get total count from the API
+            count_response = self.service.files().list(
+                q="trashed=false",
+                spaces='drive',
+                fields='nextPageToken, files(id)',
+                pageSize=1000
+            ).execute()
+            return len(count_response.get('files', []))
+            
+        except Exception as e:
+            logging.error(f"Error getting file count: {e}")
+            return 0
+
+    def _fetch_files_page(self, page_token: Optional[str] = None) -> tuple[List[Dict], Optional[str]]:
+        """Fetch a single page of files from Google Drive."""
+        try:
+            response = self.service.files().list(
+                q="trashed=false",
+                spaces='drive',
+                fields=f'nextPageToken, files({METADATA_FIELDS})',
+                pageToken=page_token
+            ).execute()
+            
+            return response.get('files', []), response.get('nextPageToken')
+            
+        except Exception as e:
+            logging.error(f"Error listing files: {e}")
+            return [], None
+
     def list_files(self, force_refresh: bool = False) -> List[Dict]:
         """List all non-trashed files in Google Drive."""
         if not force_refresh:
@@ -29,51 +71,15 @@ class DriveAPI:
 
         files = []
         page_token = None
-        
-        # First, get total number of files
-        try:
-            initial_response = self.service.files().list(
-                q="trashed=false",
-                spaces='drive',
-                fields='nextPageToken, files(id)',
-                pageSize=1
-            ).execute()
-            total_files = initial_response.get('files', [])
-            if total_files:
-                # Get total count from the API
-                total_count = self.service.files().list(
-                    q="trashed=false",
-                    spaces='drive',
-                    fields='nextPageToken, files(id)',
-                    pageSize=1000
-                ).execute().get('files', [])
-                total_count = len(total_count)
-            else:
-                total_count = 0
-        except Exception as e:
-            logging.error(f"Error getting file count: {e}")
-            total_count = 0
+        total_count = self._get_total_file_count()
         
         with tqdm(total=total_count, desc="Listing files", unit="file") as pbar:
             while True:
-                try:
-                    response = self.service.files().list(
-                        q="trashed=false",
-                        spaces='drive',
-                        fields=f'nextPageToken, files({METADATA_FIELDS})',
-                        pageToken=page_token
-                    ).execute()
-                    
-                    new_files = response.get('files', [])
-                    files.extend(new_files)
-                    pbar.update(len(new_files))
-                    
-                    page_token = response.get('nextPageToken')
-                    if not page_token:
-                        break
-                        
-                except Exception as e:
-                    logging.error(f"Error listing files: {e}")
+                new_files, page_token = self._fetch_files_page(page_token)
+                files.extend(new_files)
+                pbar.update(len(new_files))
+                
+                if not page_token:
                     break
 
         if files:
