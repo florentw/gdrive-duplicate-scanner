@@ -4,7 +4,6 @@ from auth import get_service
 from drive_api import DriveAPI
 from scanner import DuplicateScanner
 from export import write_to_csv
-from cache import MetadataCache
 from utils import get_human_readable_size
 
 def main():
@@ -20,38 +19,25 @@ def main():
         logging.error("Failed to get Google Drive service")
         return
 
-    # Initialize API, cache, and scanner
+    # Initialize API and scanner
     drive_api = DriveAPI(service)
-    cache = MetadataCache()
-    scanner = DuplicateScanner(drive_api, cache)
+    scanner = DuplicateScanner(drive_api)
 
     # Scan for duplicates
-    if args.refresh_cache:
-        logging.info("Forcing cache refresh...")
-        cache.clear()
-        files = drive_api.list_files(force_refresh=True)
-        cache.cache_files(files)
-    else:
-        files = cache.get_all_files()
-        if not files:
-            files = drive_api.list_files()
-            cache.cache_files(files)
-    
-    # Use common scanning logic
-    scanner._scan_for_duplicates(files)
+    duplicate_groups = scanner.scan(delete=args.delete, force_refresh=args.refresh_cache)
 
     # Print summary
-    total_duplicates = sum(len(group.files) - 1 for group in scanner.duplicate_groups)
-    total_wasted = sum(group.wasted_space for group in scanner.duplicate_groups)
+    total_duplicates = sum(len(group.files) - 1 for group in duplicate_groups)
+    total_wasted = sum(group.wasted_space for group in duplicate_groups)
     
-    print(f"\nFound {len(scanner.duplicate_groups)} duplicate groups")
+    print(f"\nFound {len(duplicate_groups)} duplicate groups")
     print(f"Total duplicate files: {total_duplicates}")
     print(f"Total wasted space: {get_human_readable_size(total_wasted)}")
 
     # Export to CSV
-    if scanner.duplicate_groups:
-        write_to_csv(scanner.duplicate_groups, drive_api)
+    if duplicate_groups:
+        write_to_csv(duplicate_groups, drive_api)
         print(f"\nExported duplicate information to CSV file")
 
 if __name__ == '__main__':
-    main() 
+    main()
