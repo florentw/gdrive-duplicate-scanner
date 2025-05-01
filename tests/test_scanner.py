@@ -263,5 +263,44 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
         self.assertIn('folder1', self.scanner.duplicate_files_in_folders)
         self.assertIn('folder2', self.scanner.duplicate_files_in_folders)
 
+    def test_duplicate_only_folders(self):
+        """Test identification of folders containing only duplicate files."""
+        # Setup test data
+        test_files = [
+            {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']},
+            {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']},
+            {'id': '3', 'size': '200', 'md5Checksum': 'def456', 'mimeType': 'text/plain', 'parents': ['folder2']},
+            {'id': '4', 'size': '200', 'md5Checksum': 'def456', 'mimeType': 'text/plain', 'parents': ['folder2']}
+        ]
+        test_folders = [
+            {'id': 'folder1', 'name': 'Test Folder 1'},
+            {'id': 'folder2', 'name': 'Test Folder 2'}
+        ]
+        
+        # Mock API responses
+        self.drive_api.list_files.return_value = test_files
+        self.cache.get_all_files.return_value = test_files
+        self.cache.get_all_folders.return_value = test_folders
+        
+        # Run scan
+        self.scanner.scan()
+        
+        # Verify results
+        self.assertEqual(len(self.scanner.duplicate_groups), 2)  # Two groups of duplicates
+        self.assertEqual(len(self.scanner.duplicate_files_in_folders), 2)  # Both folders have duplicates
+        self.assertEqual(len(self.scanner.duplicate_only_folders), 2)  # Both folders contain only duplicates
+        
+        # Verify folder1
+        folder1 = self.scanner.duplicate_only_folders['folder1']
+        self.assertEqual(len(folder1.duplicate_files), 2)
+        self.assertEqual(len(folder1.total_files), 2)
+        self.assertTrue(folder1.check_if_duplicate_only())
+        
+        # Verify folder2
+        folder2 = self.scanner.duplicate_only_folders['folder2']
+        self.assertEqual(len(folder2.duplicate_files), 2)
+        self.assertEqual(len(folder2.total_files), 2)
+        self.assertTrue(folder2.check_if_duplicate_only())
+
 if __name__ == '__main__':
     unittest.main() 
