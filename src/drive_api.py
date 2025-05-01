@@ -106,17 +106,52 @@ class DriveAPI:
             logging.error(f"Error getting metadata for file {file_id}: {e}")
             return None
 
-    def get_files_metadata_batch(self, file_ids: list[str]) -> Dict[str, dict]:
-        """Get metadata for multiple files using batch requests."""
+    def _process_batch_results(self, batch_handler: BatchHandler, batch_ids: list[str], results: Dict[str, dict]) -> None:
+        """Process results from a batch request and handle any failures."""
+        try:
+            batch_handler.execute()
+            batch_results = batch_handler.get_results()
+            results.update(batch_results)
+            
+            # Handle failed requests
+            failed = batch_handler.get_failed_requests()
+            if failed:
+                logging.warning(f"Failed to get metadata for {len(failed)} files")
+                self._handle_failed_requests(failed, results)
+                
+        except Exception as e:
+            logging.error(f"Batch execution failed: {e}")
+            self._handle_failed_requests(batch_ids, results)
+
+    def _handle_failed_requests(self, failed_ids: set[str], results: Dict[str, dict]) -> None:
+        """Handle failed requests by trying to get metadata individually."""
+        for file_id in failed_ids:
+            try:
+                single_result = self.get_file_metadata(file_id)
+                if single_result:
+                    results[file_id] = single_result
+            except Exception as e:
+                logging.error(f"Failed to get metadata for file {file_id}: {e}")
+                # Remove failed result if it was added
+                results.pop(file_id, None)
+
+    def _get_cached_metadata(self, file_ids: list[str]) -> tuple[Dict[str, dict], set[str]]:
+        """Get metadata from cache and return remaining uncached file IDs."""
         results = {}
         remaining_ids = set(file_ids)
         
-        # Check cache first
         for file_id in file_ids:
             cached_meta = self.cache.get(file_id)
             if cached_meta:
                 results[file_id] = cached_meta
                 remaining_ids.remove(file_id)
+                
+        return results, remaining_ids
+
+    def get_files_metadata_batch(self, file_ids: list[str]) -> Dict[str, dict]:
+        """Get metadata for multiple files using batch requests."""
+        # Check cache first
+        results, remaining_ids = self._get_cached_metadata(file_ids)
         
         if not remaining_ids:
             return results
@@ -127,41 +162,13 @@ class DriveAPI:
             for i in range(0, len(remaining_ids), BATCH_SIZE):
                 batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
                 
+                # Add requests to batch
                 for file_id in batch_ids:
                     batch_handler.add_metadata_request(file_id)
                 
-                try:
-                    batch_handler.execute()
-                    batch_results = batch_handler.get_results()
-                    results.update(batch_results)
-                    pbar.update(len(batch_ids))
-                    
-                    # Handle failed requests
-                    failed = batch_handler.get_failed_requests()
-                    if failed:
-                        logging.warning(f"Failed to get metadata for {len(failed)} files")
-                        # Try to get failed files individually
-                        for file_id in failed:
-                            try:
-                                single_result = self.get_file_metadata(file_id)
-                                if single_result:
-                                    results[file_id] = single_result
-                            except Exception as e:
-                                logging.error(f"Failed to get metadata for file {file_id}: {e}")
-                                # Remove failed result if it was added
-                                results.pop(file_id, None)
-                except Exception as e:
-                    logging.error(f"Batch execution failed: {e}")
-                    # Try to get files individually after batch failure
-                    for file_id in batch_ids:
-                        try:
-                            single_result = self.get_file_metadata(file_id)
-                            if single_result:
-                                results[file_id] = single_result
-                        except Exception as inner_e:
-                            logging.error(f"Failed to get metadata for file {file_id}: {inner_e}")
-                            # Remove failed result if it was added
-                            results.pop(file_id, None)
+                # Process batch results
+                self._process_batch_results(batch_handler, batch_ids, results)
+                pbar.update(len(batch_ids))
 
         return results
 
