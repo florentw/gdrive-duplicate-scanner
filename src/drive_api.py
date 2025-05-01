@@ -4,6 +4,7 @@ from googleapiclient.discovery import Resource
 from cache import MetadataCache
 from batch import BatchHandler
 from config import BATCH_SIZE, METADATA_FIELDS
+from tqdm import tqdm
 
 class DriveAPI:
     """Wrapper for Google Drive API operations."""
@@ -29,24 +30,51 @@ class DriveAPI:
         files = []
         page_token = None
         
-        while True:
-            try:
-                response = self.service.files().list(
+        # First, get total number of files
+        try:
+            initial_response = self.service.files().list(
+                q="trashed=false",
+                spaces='drive',
+                fields='nextPageToken, files(id)',
+                pageSize=1
+            ).execute()
+            total_files = initial_response.get('files', [])
+            if total_files:
+                # Get total count from the API
+                total_count = self.service.files().list(
                     q="trashed=false",
                     spaces='drive',
-                    fields=f'nextPageToken, files({METADATA_FIELDS})',
-                    pageToken=page_token
-                ).execute()
-                
-                files.extend(response.get('files', []))
-                page_token = response.get('nextPageToken')
-                
-                if not page_token:
-                    break
+                    fields='nextPageToken, files(id)',
+                    pageSize=1000
+                ).execute().get('files', [])
+                total_count = len(total_count)
+            else:
+                total_count = 0
+        except Exception as e:
+            logging.error(f"Error getting file count: {e}")
+            total_count = 0
+        
+        with tqdm(total=total_count, desc="Listing files", unit="file") as pbar:
+            while True:
+                try:
+                    response = self.service.files().list(
+                        q="trashed=false",
+                        spaces='drive',
+                        fields=f'nextPageToken, files({METADATA_FIELDS})',
+                        pageToken=page_token
+                    ).execute()
                     
-            except Exception as e:
-                logging.error(f"Error listing files: {e}")
-                break
+                    new_files = response.get('files', [])
+                    files.extend(new_files)
+                    pbar.update(len(new_files))
+                    
+                    page_token = response.get('nextPageToken')
+                    if not page_token:
+                        break
+                        
+                except Exception as e:
+                    logging.error(f"Error listing files: {e}")
+                    break
 
         if files:
             self.cache.set('all_files', files)
@@ -89,43 +117,45 @@ class DriveAPI:
 
         # Process remaining files in batches
         batch_handler = self._get_batch_handler()
-        for i in range(0, len(remaining_ids), BATCH_SIZE):
-            batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
-            
-            for file_id in batch_ids:
-                batch_handler.add_metadata_request(file_id)
-            
-            try:
-                batch_handler.execute()
-                batch_results = batch_handler.get_results()
-                results.update(batch_results)
+        with tqdm(total=len(remaining_ids), desc="Fetching metadata", unit="file") as pbar:
+            for i in range(0, len(remaining_ids), BATCH_SIZE):
+                batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
                 
-                # Handle failed requests
-                failed = batch_handler.get_failed_requests()
-                if failed:
-                    logging.warning(f"Failed to get metadata for {len(failed)} files")
-                    # Try to get failed files individually
-                    for file_id in failed:
+                for file_id in batch_ids:
+                    batch_handler.add_metadata_request(file_id)
+                
+                try:
+                    batch_handler.execute()
+                    batch_results = batch_handler.get_results()
+                    results.update(batch_results)
+                    pbar.update(len(batch_ids))
+                    
+                    # Handle failed requests
+                    failed = batch_handler.get_failed_requests()
+                    if failed:
+                        logging.warning(f"Failed to get metadata for {len(failed)} files")
+                        # Try to get failed files individually
+                        for file_id in failed:
+                            try:
+                                single_result = self.get_file_metadata(file_id)
+                                if single_result:
+                                    results[file_id] = single_result
+                            except Exception as e:
+                                logging.error(f"Failed to get metadata for file {file_id}: {e}")
+                                # Remove failed result if it was added
+                                results.pop(file_id, None)
+                except Exception as e:
+                    logging.error(f"Batch execution failed: {e}")
+                    # Try to get files individually after batch failure
+                    for file_id in batch_ids:
                         try:
                             single_result = self.get_file_metadata(file_id)
                             if single_result:
                                 results[file_id] = single_result
-                        except Exception as e:
-                            logging.error(f"Failed to get metadata for file {file_id}: {e}")
+                        except Exception as inner_e:
+                            logging.error(f"Failed to get metadata for file {file_id}: {inner_e}")
                             # Remove failed result if it was added
                             results.pop(file_id, None)
-            except Exception as e:
-                logging.error(f"Batch execution failed: {e}")
-                # Try to get files individually after batch failure
-                for file_id in batch_ids:
-                    try:
-                        single_result = self.get_file_metadata(file_id)
-                        if single_result:
-                            results[file_id] = single_result
-                    except Exception as inner_e:
-                        logging.error(f"Failed to get metadata for file {file_id}: {inner_e}")
-                        # Remove failed result if it was added
-                        results.pop(file_id, None)
 
         return results
 
