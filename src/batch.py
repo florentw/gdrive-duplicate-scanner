@@ -100,7 +100,7 @@ class BatchHandler:
 
         # Log batch statistics
         success_rate = (self._success_count / self._request_count * 100) if self._request_count > 0 else 0
-        logger.info(
+        logger.debug(
             f"Batch execution completed: {self._success_count}/{self._request_count} successful "
             f"({success_rate:.1f}%), {self._failure_count} failed, {self._retry_count} retries"
         )

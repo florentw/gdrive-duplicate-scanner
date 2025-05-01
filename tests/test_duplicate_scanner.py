@@ -900,7 +900,7 @@ class TestDuplicateScanner(unittest.TestCase):
             }
             
             with patch('src.drive_api.BatchHandler', return_value=mock_batch), \
-                 patch('src.drive_api.logger.info') as mock_logging:
+                 patch('src.drive_api.logger.debug') as mock_logging:
                 
                 # Call the method
                 api.get_files_metadata_batch(file_ids)

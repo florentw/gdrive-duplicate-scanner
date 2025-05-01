@@ -166,7 +166,7 @@ class DriveAPI:
         total_batches = (total_files + BATCH_SIZE - 1) // BATCH_SIZE
         avg_batch_size = total_files / total_batches if total_batches > 0 else 0
         
-        logger.info(
+        logger.debug(
             f"Processing {total_files} files in {total_batches} batches "
             f"(avg {avg_batch_size:.1f} files per batch, {self.api_request_count} API requests so far)"
         )
@@ -187,7 +187,7 @@ class DriveAPI:
         # Log final batch statistics
         stats = self.get_batch_statistics()
         success_rate = (stats['successful_requests'] / stats['total_requests'] * 100) if stats['total_requests'] > 0 else 0
-        logger.info(
+        logger.debug(
             f"Batch operations completed: {stats['total_batches']} batches, "
             f"{stats['successful_requests']}/{stats['total_requests']} successful ({success_rate:.1f}%), "
             f"{stats['failed_requests']} failed, {stats['retry_count']} retries, "
