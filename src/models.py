@@ -9,6 +9,7 @@ class BaseDuplicate:
         self.files = files
         self.metadata = metadata
         self._total_size = None
+        self.logger = logger
 
     @property
     def total_size(self) -> int:
@@ -58,6 +59,7 @@ class DuplicateFolder(BaseDuplicate):
         self._total_size = None
         self.files = []  # Will be populated later with actual files
         self.total_files = set()  # Initialize empty set for total files
+        self.logger = logger
 
     @property
     def id(self) -> str:

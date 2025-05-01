@@ -5,6 +5,7 @@ from models import DuplicateGroup, DuplicateFolder
 from utils import get_human_readable_size
 from cache import MetadataCache
 from config import logger
+from tqdm import tqdm
 
 class BaseDuplicateScanner:
     """Base class for scanning Google Drive for duplicate files."""
@@ -14,6 +15,7 @@ class BaseDuplicateScanner:
         self.cache = cache
         self.duplicate_groups: List[DuplicateGroup] = []
         self.duplicate_files_in_folders: Dict[str, DuplicateFolder] = {}
+        self.logger = logger
 
     def _filter_valid_files(self, files: List[Dict]) -> List[Dict]:
         """Filter out files that are not valid for duplicate detection."""
@@ -68,7 +70,6 @@ class BaseDuplicateScanner:
         if len(files) > 1:
             group = DuplicateGroup(files, metadata)
             self.duplicate_groups.append(group)
-            group.print_info()
 
     def _scan_for_duplicates(self, files: List[Dict]) -> None:
         """Common scanning logic for finding duplicate files.
@@ -82,21 +83,23 @@ class BaseDuplicateScanner:
         """
         # Filter valid files
         valid_files = self._filter_valid_files(files)
-        logger.info(f"Found {len(valid_files)} valid files to check for duplicates")
+        self.logger.info(f"Found {len(valid_files)} valid files to check for duplicates")
         
         # Group by size first - optimization to reduce number of MD5 comparisons needed
         size_groups = self._group_files_by_size(valid_files)
-        logger.info(f"Found {len(size_groups)} unique file sizes")
+        self.logger.info(f"Found {len(size_groups)} unique file sizes")
         
         # For each size group, check MD5 hashes
-        for size, files in size_groups.items():
-            if len(files) > 1:  # Only check if there are multiple files of the same size
-                md5_groups = self._group_files_by_md5(files)
-                for md5, duplicate_files in md5_groups.items():
-                    if len(duplicate_files) > 1:  # Only process if there are actual duplicates
-                        # Create metadata dictionary for the group
-                        metadata = {file['id']: file for file in duplicate_files}
-                        self._process_duplicate_group(duplicate_files, metadata)
+        with tqdm(total=len(size_groups), desc="Scanning for duplicates", unit="size group") as pbar:
+            for size, files in size_groups.items():
+                if len(files) > 1:  # Only check if there are multiple files of the same size
+                    md5_groups = self._group_files_by_md5(files)
+                    for md5, duplicate_files in md5_groups.items():
+                        if len(duplicate_files) > 1:  # Only process if there are actual duplicates
+                            # Create metadata dictionary for the group
+                            metadata = {file['id']: file for file in duplicate_files}
+                            self._process_duplicate_group(duplicate_files, metadata)
+                pbar.update(1)
 
     def scan(self) -> None:
         """Scan for duplicate files."""
@@ -107,7 +110,7 @@ class DuplicateScanner(BaseDuplicateScanner):
     
     def scan(self) -> None:
         """Scan for duplicate files."""
-        logger.info("Starting duplicate file scan...")
+        self.logger.info("Starting duplicate file scan...")
         
         # Get all files from cache or API
         files = self.cache.get_all_files()
@@ -118,14 +121,14 @@ class DuplicateScanner(BaseDuplicateScanner):
         # Use common scanning logic
         self._scan_for_duplicates(files)
         
-        logger.info(f"Found {len(self.duplicate_groups)} groups of duplicate files")
+        self.logger.info(f"Found {len(self.duplicate_groups)} groups of duplicate files")
 
 class DuplicateScannerWithFolders(BaseDuplicateScanner):
     """Scanner for finding duplicate files and analyzing folder structures."""
     
     def scan(self) -> None:
         """Scan for duplicate files and analyze folder structures."""
-        logger.info("Starting duplicate file scan with folder analysis...")
+        self.logger.info("Starting duplicate file scan with folder analysis...")
         
         # Get all files and folders from cache or API
         files = self.cache.get_all_files()
@@ -142,8 +145,8 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
         # Analyze folder structures
         self._analyze_folder_structures(folders)
         
-        logger.info(f"Found {len(self.duplicate_groups)} groups of duplicate files")
-        logger.info(f"Found {len(self.duplicate_files_in_folders)} folders with duplicate files")
+        self.logger.info(f"Found {len(self.duplicate_groups)} groups of duplicate files")
+        self.logger.info(f"Found {len(self.duplicate_files_in_folders)} folders with duplicate files")
 
     def _analyze_folder_structures(self, folders: List[Dict]) -> None:
         """Analyze folder structures to identify folders containing duplicate files."""
@@ -158,13 +161,15 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
                         folder_files[parent_id].add(file['id'])
         
         # Analyze each folder
-        for folder in folders:
-            folder_id = folder['id']
-            if folder_id in folder_files:
-                duplicate_files = folder_files[folder_id]
-                if duplicate_files:
-                    self.duplicate_files_in_folders[folder_id] = DuplicateFolder(
-                        folder_id,
-                        folder,
-                        duplicate_files
-                    ) 
+        with tqdm(total=len(folders), desc="Analyzing folders", unit="folder") as pbar:
+            for folder in folders:
+                folder_id = folder['id']
+                if folder_id in folder_files:
+                    duplicate_files = folder_files[folder_id]
+                    if duplicate_files:
+                        self.duplicate_files_in_folders[folder_id] = DuplicateFolder(
+                            folder_id,
+                            folder,
+                            duplicate_files
+                        )
+                pbar.update(1) 
