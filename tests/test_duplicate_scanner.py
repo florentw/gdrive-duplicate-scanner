@@ -872,6 +872,43 @@ class TestDuplicateScanner(unittest.TestCase):
                 mock_logging.reset_mock()
                 mock_batch.reset_mock()
 
+    def test_drive_api_request_counting(self):
+        """Test API request counting functionality."""
+        # Setup
+        mock_service = MagicMock()
+        api = DriveAPI(mock_service)
+        
+        # Test single file metadata request
+        mock_file = {'id': 'test_id', 'name': 'test_file.txt'}
+        mock_service.files().get().execute.return_value = mock_file
+        
+        # First call should increment counter
+        api.get_file_metadata('test_id')
+        self.assertEqual(api.api_request_count, 1)
+        
+        # Second call should use cache and not increment counter
+        api.get_file_metadata('test_id')
+        self.assertEqual(api.api_request_count, 1)
+        
+        # Test batch metadata request
+        mock_files = [
+            {'id': 'id1', 'name': 'file1.txt'},
+            {'id': 'id2', 'name': 'file2.txt'}
+        ]
+        mock_service.files().list().execute.return_value = {'files': mock_files}
+        
+        # List files should increment counter by 3 (2 for _get_total_file_count + 1 for actual list)
+        api.list_files()
+        self.assertEqual(api.api_request_count, 4)
+        
+        # Second list should use cache and not increment counter
+        api.list_files()
+        self.assertEqual(api.api_request_count, 4)
+        
+        # Force refresh should increment counter by 3 again
+        api.list_files(force_refresh=True)
+        self.assertEqual(api.api_request_count, 7)
+
 if __name__ == '__main__':
     unittest.main()
     

@@ -13,6 +13,7 @@ class DriveAPI:
         self.service = service
         self.cache = cache or MetadataCache()
         self.batch_handler = None
+        self.api_request_count = 0  # Add counter for API requests
 
     def _get_batch_handler(self) -> BatchHandler:
         """Get a new batch handler instance."""
@@ -20,9 +21,14 @@ class DriveAPI:
             self.batch_handler = BatchHandler(self.service, self.cache)
         return self.batch_handler
 
+    def _increment_request_count(self) -> None:
+        """Increment the API request counter."""
+        self.api_request_count += 1
+
     def _get_total_file_count(self) -> int:
         """Get total number of files in Google Drive."""
         try:
+            self._increment_request_count()  # Count initial API request
             initial_response = self.service.files().list(
                 q="trashed=false",
                 spaces='drive',
@@ -34,6 +40,7 @@ class DriveAPI:
                 return 0
                 
             # Get total count from the API
+            self._increment_request_count()  # Count second API request
             count_response = self.service.files().list(
                 q="trashed=false",
                 spaces='drive',
@@ -49,6 +56,7 @@ class DriveAPI:
     def _fetch_files_page(self, page_token: Optional[str] = None) -> tuple[List[Dict], Optional[str]]:
         """Fetch a single page of files from Google Drive."""
         try:
+            self._increment_request_count()  # Count API request
             response = self.service.files().list(
                 q="trashed=false",
                 spaces='drive',
@@ -94,6 +102,7 @@ class DriveAPI:
             return cached_meta
 
         try:
+            self._increment_request_count()  # Only increment for actual API calls
             file = self.service.files().get(
                 fileId=file_id,
                 fields=METADATA_FIELDS
@@ -162,7 +171,7 @@ class DriveAPI:
         total_batches = (total_files + BATCH_SIZE - 1) // BATCH_SIZE
         avg_batch_size = total_files / total_batches
         
-        logging.info(f"Processing {total_files} files in {total_batches} batches (avg {avg_batch_size:.1f} files per batch)")
+        logging.info(f"Processing {total_files} files in {total_batches} batches (avg {avg_batch_size:.1f} files per batch, {self.api_request_count} API requests so far)")
         
         for i in range(0, len(remaining_ids), BATCH_SIZE):
             batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
