@@ -8,11 +8,12 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import UnknownApiNameOrVersion
 
 # If modifying these scopes, delete the file token.json.
-SCOPES = ['https://www.googleapis.com/auth/drive']
+SCOPES = ["https://www.googleapis.com/auth/drive"]
+
 
 def get_service():
     """Gets an authorized Google Drive API service instance.
-    
+
     Returns:
         googleapiclient.discovery.Resource: An authorized Google Drive API service instance.
         None if authentication fails.
@@ -20,9 +21,9 @@ def get_service():
     creds = None
     # The file token.json stores the user's access and refresh tokens, and is
     # created automatically when the authorization flow completes for the first time.
-    if os.path.exists('token.json'):
+    if os.path.exists("token.json"):
         try:
-            with open('token.json', 'rb') as token:
+            with open("token.json", "rb") as token:
                 creds = pickle.load(token)
         except Exception as e:
             logging.error(f"Error loading token: {e}")
@@ -39,7 +40,8 @@ def get_service():
         else:
             try:
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    'credentials.json', SCOPES)
+                    "credentials.json", SCOPES
+                )
                 creds = flow.run_local_server(port=0)
             except FileNotFoundError:
                 logging.error("credentials.json not found")
@@ -50,18 +52,18 @@ def get_service():
 
         # Save the credentials for the next run
         try:
-            with open('token.json', 'wb') as token:
+            with open("token.json", "wb") as token:
                 pickle.dump(creds, token)
             # Ensure the token file has the correct permissions
-            os.chmod('token.json', 0o600)
+            os.chmod("token.json", 0o600)
         except Exception as e:
             logging.error(f"Error saving token: {e}")
             return None
 
     try:
         # Build the service
-        service = build('drive', 'v3', credentials=creds)
+        service = build("drive", "v3", credentials=creds)
         return service
     except Exception as e:
         logging.error(f"Error building service: {e}")
-        return None 
+        return None
