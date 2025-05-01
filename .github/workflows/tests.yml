@@ -2,7 +2,7 @@ name: Unit Tests
 
 on:
   push:
-    branches: [ main, improve-performance ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
