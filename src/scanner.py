@@ -24,7 +24,21 @@ class BaseDuplicateScanner:
         ]
 
     def _group_files_by_size(self, files: List[Dict]) -> Dict[str, List[Dict]]:
-        """Group files by their size."""
+        """Group files by their size.
+        
+        This is an optimization step that reduces the number of MD5 hash comparisons needed.
+        Instead of comparing every file's MD5 with every other file (O(n²) comparisons),
+        we first group files by size. Since files of different sizes cannot be duplicates,
+        we only need to compare MD5 hashes within each size group.
+        
+        For example, if we have 10,000 files distributed across 1,000 different sizes:
+        - Without size grouping: Up to 50 million MD5 comparisons (n * (n-1) / 2)
+        - With size grouping: If files are evenly distributed, each size group has ~10 files,
+          leading to only ~45,000 comparisons (1000 groups * (10 * 9 / 2) comparisons per group)
+        
+        Note: MD5 hashes are pre-computed by Google Drive, so we're optimizing the number of
+        string comparisons, not hash computations.
+        """
         size_groups: Dict[str, List[Dict]] = {}
         for file in files:
             size = file.get('size', '0')
@@ -34,7 +48,12 @@ class BaseDuplicateScanner:
         return size_groups
 
     def _group_files_by_md5(self, files: List[Dict]) -> Dict[str, List[Dict]]:
-        """Group files by their MD5 hash."""
+        """Group files by their MD5 hash.
+        
+        This is called after size-based grouping to identify actual duplicates.
+        Files with the same MD5 hash within a size group are duplicates.
+        The MD5 hashes are pre-computed by Google Drive and provided in the file metadata.
+        """
         md5_groups: Dict[str, List[Dict]] = {}
         for file in files:
             md5 = file.get('md5Checksum', '')
@@ -52,12 +71,20 @@ class BaseDuplicateScanner:
             group.print_info()
 
     def _scan_for_duplicates(self, files: List[Dict]) -> None:
-        """Common scanning logic for finding duplicate files."""
+        """Common scanning logic for finding duplicate files.
+        
+        The duplicate detection process is optimized using a two-step approach:
+        1. Group files by size (O(n) operation) - files of different sizes cannot be duplicates
+        2. Within each size group, group files by MD5 hash to find actual duplicates
+        
+        This significantly reduces the number of comparisons needed compared to
+        comparing every file with every other file.
+        """
         # Filter valid files
         valid_files = self._filter_valid_files(files)
         logger.info(f"Found {len(valid_files)} valid files to check for duplicates")
         
-        # Group by size first
+        # Group by size first - optimization to reduce number of MD5 comparisons needed
         size_groups = self._group_files_by_size(valid_files)
         logger.info(f"Found {len(size_groups)} unique file sizes")
         
