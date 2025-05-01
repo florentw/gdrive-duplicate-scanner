@@ -32,7 +32,6 @@ CSV_HEADERS = [
 
 # Cache settings
 CACHE_FILE = 'drive_metadata_cache.json'
-CACHE_EXPIRY_HOURS = 24  # Cache expires after 24 hours
 SAVE_INTERVAL_MINUTES = 5  # Save every 5 minutes if modified
 
 # API settings

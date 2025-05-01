@@ -90,6 +90,14 @@ Run the script with the `--refresh-cache` argument to force refresh the cache:
 python duplicate_scanner.py --refresh-cache
 ```
 
+### Cache Behavior
+The script maintains a cache of file metadata to improve performance and reduce API calls. The cache:
+- Persists between runs in `drive_metadata_cache.json`
+- Is automatically invalidated when Google credentials change
+- Can be manually refreshed using the `--refresh-cache` argument
+- Is saved every 5 minutes when modified
+- Uses atomic writes to prevent corruption
+
 ### Delete Behavior
 When the --delete argument is used, the behavior is as follows:
 
