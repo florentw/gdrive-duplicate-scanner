@@ -147,44 +147,19 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
         super().__init__(drive_api, cache)
         self.duplicate_only_folders: Dict[str, DuplicateFolder] = {}
     
-    def scan(self) -> None:
-        """Scan for duplicate files and analyze folder structures."""
-        self.logger.info("Starting duplicate file scan with folder analysis...")
+    def _analyze_folder_structures(self, folders: List[Dict], files: List[Dict]) -> None:
+        """Analyze folder structures to identify folders containing duplicate files.
         
-        # Get all files and folders from cache or API
-        files = self.cache.get_all_files()
-        folders = self.cache.get_all_folders()
-        
-        if not files or not folders:
-            files, folders = self.drive_api.list_all_files_and_folders()
-            self.cache.cache_files(files)
-            self.cache.cache_folders(folders)
-        
-        # Use common scanning logic
-        self._scan_for_duplicates(files)
-        
-        # Analyze folder structures
-        self._analyze_folder_structures(folders)
-        
-        # Calculate and log summary statistics
-        total_duplicates = sum(len(group.files) for group in self.duplicate_groups)
-        total_wasted = sum(group.wasted_space for group in self.duplicate_groups)
-        wasted_gb = total_wasted / (1024 * 1024 * 1024)
-        
-        print(f"\nFound {len(self.duplicate_groups)} duplicate groups")
-        print(f"Total duplicate files: {total_duplicates}")
-        print(f"Total wasted space: {wasted_gb:.2f} GB")
-        print(f"Found {len(self.duplicate_files_in_folders)} folders with duplicate files")
-        print(f"Found {len(self.duplicate_only_folders)} folders containing only duplicate files\n")
-
-    def _analyze_folder_structures(self, folders: List[Dict]) -> None:
-        """Analyze folder structures to identify folders containing duplicate files."""
+        Args:
+            folders: List of folder metadata from Google Drive
+            files: List of file metadata from Google Drive (reused from scan)
+        """
         # Create a mapping of folder IDs to their files
         folder_files: Dict[str, Set[str]] = {}
         folder_total_files: Dict[str, Set[str]] = {}
         
         # First, collect all files in each folder
-        for file in self.drive_api.list_files():
+        for file in files:  # Use the files passed in instead of calling list_files()
             if 'parents' in file:
                 for parent_id in file['parents']:
                     if parent_id not in folder_total_files:
@@ -218,4 +193,34 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
                         # Check if folder contains only duplicates
                         if folder_obj.check_if_duplicate_only():
                             self.duplicate_only_folders[folder_id] = folder_obj
-                pbar.update(1) 
+                pbar.update(1)
+
+    def scan(self) -> None:
+        """Scan for duplicate files and analyze folder structures."""
+        self.logger.info("Starting duplicate file scan with folder analysis...")
+        
+        # Get all files and folders from cache or API
+        files = self.cache.get_all_files()
+        folders = self.cache.get_all_folders()
+        
+        if not files or not folders:
+            files, folders = self.drive_api.list_all_files_and_folders()
+            self.cache.cache_files(files)
+            self.cache.cache_folders(folders)
+        
+        # Use common scanning logic
+        self._scan_for_duplicates(files)
+        
+        # Analyze folder structures
+        self._analyze_folder_structures(folders, files)  # Pass the files list
+        
+        # Calculate and log summary statistics
+        total_duplicates = sum(len(group.files) for group in self.duplicate_groups)
+        total_wasted = sum(group.wasted_space for group in self.duplicate_groups)
+        wasted_gb = total_wasted / (1024 * 1024 * 1024)
+        
+        print(f"\nFound {len(self.duplicate_groups)} duplicate groups")
+        print(f"Total duplicate files: {total_duplicates}")
+        print(f"Total wasted space: {wasted_gb:.2f} GB")
+        print(f"Found {len(self.duplicate_files_in_folders)} folders with duplicate files")
+        print(f"Found {len(self.duplicate_only_folders)} folders containing only duplicate files\n") 

@@ -329,7 +329,8 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
             )
         ]
         
-        self.scanner._analyze_folder_structures(test_folders)
+        self.scanner._analyze_folder_structures(test_folders, test_files)
+        
         self.assertEqual(len(self.scanner.duplicate_files_in_folders), 2)
         self.assertIn('folder1', self.scanner.duplicate_files_in_folders)
         self.assertIn('folder2', self.scanner.duplicate_files_in_folders)
