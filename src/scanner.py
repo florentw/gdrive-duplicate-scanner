@@ -121,7 +121,14 @@ class DuplicateScanner(BaseDuplicateScanner):
         # Use common scanning logic
         self._scan_for_duplicates(files)
         
-        self.logger.info(f"Found {len(self.duplicate_groups)} groups of duplicate files")
+        # Calculate and log summary statistics
+        total_duplicates = sum(len(group.files) for group in self.duplicate_groups)
+        total_wasted = sum(group.wasted_space for group in self.duplicate_groups)
+        wasted_gb = total_wasted / (1024 * 1024 * 1024)
+        
+        print(f"\nFound {len(self.duplicate_groups)} duplicate groups")
+        print(f"Total duplicate files: {total_duplicates}")
+        print(f"Total wasted space: {wasted_gb:.2f} GB")
 
 class DuplicateScannerWithFolders(BaseDuplicateScanner):
     """Scanner for finding duplicate files and analyzing folder structures."""
@@ -145,8 +152,15 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
         # Analyze folder structures
         self._analyze_folder_structures(folders)
         
-        self.logger.info(f"Found {len(self.duplicate_groups)} groups of duplicate files")
-        self.logger.info(f"Found {len(self.duplicate_files_in_folders)} folders with duplicate files")
+        # Calculate and log summary statistics
+        total_duplicates = sum(len(group.files) for group in self.duplicate_groups)
+        total_wasted = sum(group.wasted_space for group in self.duplicate_groups)
+        wasted_gb = total_wasted / (1024 * 1024 * 1024)
+        
+        print(f"\nFound {len(self.duplicate_groups)} duplicate groups")
+        print(f"Total duplicate files: {total_duplicates}")
+        print(f"Total wasted space: {wasted_gb:.2f} GB")
+        print(f"Found {len(self.duplicate_files_in_folders)} folders with duplicate files")
 
     def _analyze_folder_structures(self, folders: List[Dict]) -> None:
         """Analyze folder structures to identify folders containing duplicate files."""
