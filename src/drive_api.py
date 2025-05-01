@@ -76,7 +76,7 @@ class DriveAPI:
         files = []
         page_token = None
         
-        with tqdm(desc="Scanning Drive", unit="file") as pbar:
+        with tqdm(desc="Scanning Drive", unit=" files", unit_scale=True) as pbar:
             while True:
                 new_files, page_token = self._fetch_files_page(page_token)
                 files.extend(new_files)
