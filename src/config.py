@@ -7,27 +7,31 @@ LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 LOG_FILE = 'drive_scanner.log'
 LOG_LEVEL = logging.INFO
 
+# Create and configure the drive_scanner logger
+logger = logging.getLogger('drive_scanner')
+logger.setLevel(LOG_LEVEL)
+
+# Remove any existing handlers to prevent duplicates
+logger.handlers = []
+
 # Create file handler
 file_handler = logging.FileHandler(LOG_FILE)
 file_handler.setLevel(LOG_LEVEL)
 file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+logger.addHandler(file_handler)
 
 # Create console handler
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(LOG_LEVEL)
 console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+logger.addHandler(console_handler)
 
-# Configure root logger to only show warnings and above
+# Prevent propagation to root logger
+logger.propagate = False
+
+# Set root logger to WARNING to prevent duplicate messages
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.WARNING)
-
-# Configure drive_scanner logger
-logger = logging.getLogger('drive_scanner')
-logger.setLevel(LOG_LEVEL)
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
-# Prevent propagation to root logger to avoid duplicate messages
-logger.propagate = False
 
 # Set external library loggers to WARNING level
 logging.getLogger('googleapiclient').setLevel(logging.WARNING)
