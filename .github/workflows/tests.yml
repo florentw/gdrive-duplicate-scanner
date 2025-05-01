@@ -24,15 +24,13 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pytest pytest-cov
-        pip install -r requirements.txt
+        pip install -e .
         
     - name: Run tests
       run: |
-        python -m pytest tests/ -v --cov=src
+        pytest tests/ --cov=src
         
-    - name: Upload coverage report
+    - name: Upload coverage
       uses: codecov/codecov-action@v4
       with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        fail_ci_if_error: true 
+        token: ${{ secrets.CODECOV_TOKEN }} 
