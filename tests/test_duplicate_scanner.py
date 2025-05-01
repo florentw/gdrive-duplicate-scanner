@@ -20,7 +20,7 @@ from src.models import DuplicateGroup, DuplicateFolder
 from src.scanner import DuplicateScanner, DuplicateScannerWithFolders
 from src.export import write_to_csv
 from src.utils import get_human_readable_size
-from src.config import BATCH_SIZE, METADATA_FIELDS, logger
+from src.config import BATCH_SIZE, METADATA_FIELDS, logger, MAX_RETRIES
 from duplicate_scanner import main
 
 class TestDuplicateScanner(unittest.TestCase):
@@ -900,7 +900,7 @@ class TestDuplicateScanner(unittest.TestCase):
             }
             
             with patch('src.drive_api.BatchHandler', return_value=mock_batch), \
-                 patch('src.drive_api.logger.debug') as mock_logging:
+                 patch('src.drive_api.logger.info') as mock_logging:
                 
                 # Call the method
                 api.get_files_metadata_batch(file_ids)
@@ -965,6 +965,87 @@ class TestDuplicateScanner(unittest.TestCase):
         # Force refresh should increment counter by 1 again
         api.list_files(force_refresh=True)
         self.assertEqual(api.api_request_count, 3)
+
+    def test_batch_handler_error_handling(self):
+        """Test BatchHandler error handling and retry logic."""
+        # Setup
+        mock_service = MagicMock()
+        mock_batch = MagicMock()
+        mock_service.new_batch_http_request.return_value = mock_batch
+        handler = BatchHandler(mock_service, self.test_cache)
+        
+        # Add some requests
+        file_ids = ['id1', 'id2', 'id3']
+        for file_id in file_ids:
+            handler.add_metadata_request(file_id)
+        
+        # Test complete batch failure
+        mock_batch.execute.side_effect = Exception("API Error")
+        
+        # Should raise after MAX_RETRIES attempts
+        with self.assertRaises(Exception):
+            handler.execute()
+        
+        # Verify retry attempts
+        self.assertEqual(mock_batch.execute.call_count, MAX_RETRIES)
+        self.assertEqual(handler._retry_count, MAX_RETRIES)
+        
+        # Test partial batch failure
+        mock_batch.execute.reset_mock()
+        mock_batch.execute.side_effect = None
+        
+        # Simulate some failed callbacks
+        for file_id in file_ids[:2]:  # First two succeed
+            callback = mock_batch.add.call_args_list[file_ids.index(file_id)][1]['callback']
+            callback(file_id, {'id': file_id}, None)
+        
+        # Last one fails
+        error_callback = mock_batch.add.call_args_list[2][1]['callback']
+        error_callback('id3', None, Exception("API Error"))
+        
+        # Verify error handling
+        self.assertEqual(len(handler.get_failed_requests()), 1)
+        self.assertTrue('id3' in handler.get_failed_requests())
+        self.assertEqual(handler._failure_count, 1)
+        self.assertEqual(handler._success_count, 2)
+
+    def test_drive_api_batch_failure_handling(self):
+        """Test DriveAPI handling of batch failures."""
+        # Setup
+        mock_service = MagicMock()
+        api = DriveAPI(mock_service, self.test_cache)
+        
+        # Test complete batch failure with retry
+        file_ids = ['id1', 'id2', 'id3']
+        mock_batch = MagicMock()
+        mock_batch.execute.side_effect = Exception("Batch Error")
+        mock_batch.get_failed_requests.return_value = set(file_ids)
+        mock_batch.get_statistics.return_value = {
+            'total_requests': len(file_ids),
+            'successful_requests': 0,
+            'failed_requests': len(file_ids),
+            'retry_count': MAX_RETRIES
+        }
+        
+        # Mock individual retries to succeed for some files
+        def mock_get_metadata(file_id):
+            return {'id': file_id} if file_id != 'id3' else None
+        
+        with patch.object(DriveAPI, '_get_batch_handler', return_value=mock_batch), \
+             patch.object(DriveAPI, 'get_file_metadata', side_effect=mock_get_metadata):
+            
+            results = api.get_files_metadata_batch(file_ids)
+            
+            # Verify results
+            self.assertEqual(len(results), 2)  # Two successful retries
+            self.assertTrue('id1' in results)
+            self.assertTrue('id2' in results)
+            self.assertFalse('id3' in results)  # Failed retry
+            
+            # Verify statistics
+            stats = api.get_batch_statistics()
+            self.assertEqual(stats['failed_requests'], len(file_ids))
+            self.assertEqual(stats['retry_count'], MAX_RETRIES)
 
 if __name__ == '__main__':
     unittest.main()

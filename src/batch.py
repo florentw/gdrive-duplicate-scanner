@@ -21,18 +21,21 @@ class BatchHandler:
         self._success_count = 0
         self._failure_count = 0
         self._retry_count = 0
+        self._current_batch_size = 0
         self._init_batch()
 
     def _init_batch(self) -> None:
         """Initialize a new batch request."""
         self.batch = self.service.new_batch_http_request()
+        self._current_batch_size = 0
 
     def add_metadata_request(self, file_id: str) -> None:
         """Add a metadata request to the batch."""
-        if not self.batch:
+        if not self.batch or self._current_batch_size >= BATCH_SIZE:
             self._init_batch()
 
         self._request_count += 1
+        self._current_batch_size += 1
 
         def callback(request_id, response, exception):
             if exception is not None:
@@ -55,10 +58,11 @@ class BatchHandler:
 
     def add_trash_request(self, file_id: str) -> None:
         """Add a trash request to the batch."""
-        if not self.batch:
+        if not self.batch or self._current_batch_size >= BATCH_SIZE:
             self._init_batch()
 
         self._request_count += 1
+        self._current_batch_size += 1
 
         def callback(request_id, response, exception):
             if exception is not None:
@@ -100,7 +104,7 @@ class BatchHandler:
 
         # Log batch statistics
         success_rate = (self._success_count / self._request_count * 100) if self._request_count > 0 else 0
-        logger.debug(
+        logger.info(
             f"Batch execution completed: {self._success_count}/{self._request_count} successful "
             f"({success_rate:.1f}%), {self._failure_count} failed, {self._retry_count} retries"
         )

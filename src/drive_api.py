@@ -166,28 +166,29 @@ class DriveAPI:
         total_batches = (total_files + BATCH_SIZE - 1) // BATCH_SIZE
         avg_batch_size = total_files / total_batches if total_batches > 0 else 0
         
-        logger.debug(
+        logger.info(
             f"Processing {total_files} files in {total_batches} batches "
             f"(avg {avg_batch_size:.1f} files per batch, {self.api_request_count} API requests so far)"
         )
         
-        for i in range(0, len(remaining_ids), BATCH_SIZE):
-            batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
+        current_batch_size = 0
+        for file_id in remaining_ids:
+            batch_handler.add_metadata_request(file_id)
+            current_batch_size += 1
             
-            # Add requests to batch
-            for file_id in batch_ids:
-                batch_handler.add_metadata_request(file_id)
-            
-            # Process batch results
-            self._process_batch_results(batch_handler, batch_ids, results)
-            
-            # Update statistics
-            self._update_batch_statistics(batch_handler.get_statistics())
+            # Only execute batch when we reach BATCH_SIZE or it's the last batch
+            if current_batch_size >= BATCH_SIZE or file_id == list(remaining_ids)[-1]:
+                # Process batch results
+                self._process_batch_results(batch_handler, list(remaining_ids), results)
+                
+                # Update statistics
+                self._update_batch_statistics(batch_handler.get_statistics())
+                current_batch_size = 0
 
         # Log final batch statistics
         stats = self.get_batch_statistics()
         success_rate = (stats['successful_requests'] / stats['total_requests'] * 100) if stats['total_requests'] > 0 else 0
-        logger.debug(
+        logger.info(
             f"Batch operations completed: {stats['total_batches']} batches, "
             f"{stats['successful_requests']}/{stats['total_requests']} successful ({success_rate:.1f}%), "
             f"{stats['failed_requests']} failed, {stats['retry_count']} retries, "
