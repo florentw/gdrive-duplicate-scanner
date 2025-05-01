@@ -133,6 +133,10 @@ class DuplicateScanner(BaseDuplicateScanner):
 class DuplicateScannerWithFolders(BaseDuplicateScanner):
     """Scanner for finding duplicate files and analyzing folder structures."""
     
+    def __init__(self, drive_api: DriveAPI, cache: MetadataCache):
+        super().__init__(drive_api, cache)
+        self.duplicate_only_folders: Dict[str, DuplicateFolder] = {}
+    
     def scan(self) -> None:
         """Scan for duplicate files and analyze folder structures."""
         self.logger.info("Starting duplicate file scan with folder analysis...")
@@ -161,11 +165,23 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
         print(f"Total duplicate files: {total_duplicates}")
         print(f"Total wasted space: {wasted_gb:.2f} GB")
         print(f"Found {len(self.duplicate_files_in_folders)} folders with duplicate files")
+        print(f"Found {len(self.duplicate_only_folders)} folders containing only duplicate files")
 
     def _analyze_folder_structures(self, folders: List[Dict]) -> None:
         """Analyze folder structures to identify folders containing duplicate files."""
         # Create a mapping of folder IDs to their files
         folder_files: Dict[str, Set[str]] = {}
+        folder_total_files: Dict[str, Set[str]] = {}
+        
+        # First, collect all files in each folder
+        for file in self.drive_api.list_files():
+            if 'parents' in file:
+                for parent_id in file['parents']:
+                    if parent_id not in folder_total_files:
+                        folder_total_files[parent_id] = set()
+                    folder_total_files[parent_id].add(file['id'])
+        
+        # Then, collect duplicate files in each folder
         for group in self.duplicate_groups:
             for file in group.files:
                 if 'parents' in file:
@@ -181,9 +197,15 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
                 if folder_id in folder_files:
                     duplicate_files = folder_files[folder_id]
                     if duplicate_files:
-                        self.duplicate_files_in_folders[folder_id] = DuplicateFolder(
+                        folder_obj = DuplicateFolder(
                             folder_id,
                             folder,
                             duplicate_files
                         )
+                        folder_obj.total_files = folder_total_files.get(folder_id, set())
+                        self.duplicate_files_in_folders[folder_id] = folder_obj
+                        
+                        # Check if folder contains only duplicates
+                        if folder_obj.check_if_duplicate_only():
+                            self.duplicate_only_folders[folder_id] = folder_obj
                 pbar.update(1) 
