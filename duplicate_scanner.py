@@ -26,19 +26,7 @@ def main():
     scanner = DuplicateScanner(drive_api, cache)
 
     # Scan for duplicates
-    if args.refresh_cache:
-        logging.info("Forcing cache refresh...")
-        cache.clear()
-        files = drive_api.list_files(force_refresh=True)
-        cache.cache_files(files)
-    else:
-        files = cache.get_all_files()
-        if not files:
-            files = drive_api.list_files()
-            cache.cache_files(files)
-    
-    # Use common scanning logic
-    scanner._scan_for_duplicates(files)
+    scanner.scan()  # Use the scan() method which handles caching internally
 
     # Print summary
     total_duplicates = sum(len(group.files) - 1 for group in scanner.duplicate_groups)
