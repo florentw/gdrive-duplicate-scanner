@@ -67,7 +67,9 @@ class BaseDuplicateScanner:
                 md5_groups = self._group_files_by_md5(files)
                 for md5, duplicate_files in md5_groups.items():
                     if len(duplicate_files) > 1:  # Only process if there are actual duplicates
-                        self._process_duplicate_group(duplicate_files, {})
+                        # Create metadata dictionary for the group
+                        metadata = {file['id']: file for file in duplicate_files}
+                        self._process_duplicate_group(duplicate_files, metadata)
 
     def scan(self) -> None:
         """Scan for duplicate files."""
