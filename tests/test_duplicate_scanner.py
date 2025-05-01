@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import shutil
 import csv
+from datetime import datetime
 
 # Add parent directory to Python path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,10 +15,10 @@ from src.drive_api import DriveAPI
 from src.batch import BatchHandler
 from src.cache import MetadataCache
 from src.models import DuplicateGroup, DuplicateFolder
-from src.scanner import DuplicateScanner
+from src.scanner import DuplicateScanner, DuplicateScannerWithFolders
 from src.export import write_to_csv
 from src.utils import get_human_readable_size
-from src.config import BATCH_SIZE
+from src.config import BATCH_SIZE, METADATA_FIELDS
 from duplicate_scanner import main
 
 class TestDuplicateScanner(unittest.TestCase):
@@ -287,15 +288,29 @@ class TestDuplicateScanner(unittest.TestCase):
             {'id': 'id2', 'name': 'file2.txt'}
         ]
         
-        # Mock API response
-        self.mock_files_service.list.return_value.execute.return_value = {
-            'files': mock_files
-        }
+        # Mock API responses for progress bar
+        initial_response = {'files': [{'id': 'id1'}]}  # First call to get file count
+        count_response = {'files': mock_files}  # Second call to get total count
+        final_response = {'files': mock_files}  # Final call to get actual files
+        
+        # Set up mock to return different responses
+        self.mock_files_service.list.return_value.execute.side_effect = [
+            initial_response,  # For pageSize=1
+            count_response,   # For pageSize=1000
+            final_response    # For actual file listing
+        ]
         
         result = self.drive_api.list_files()
         
         self.assertEqual(result, mock_files)
-        self.mock_files_service.list.assert_called_once()
+        # Verify all expected calls were made
+        self.assertEqual(self.mock_files_service.list.call_count, 3)
+        
+        # Verify the calls were made with correct parameters
+        calls = self.mock_files_service.list.call_args_list
+        self.assertEqual(calls[0][1]['pageSize'], 1)
+        self.assertEqual(calls[1][1]['pageSize'], 1000)
+        self.assertIn(METADATA_FIELDS, calls[2][1]['fields'])
 
     def test_drive_api_list_files_error(self):
         """Test listing files error handling."""
