@@ -23,7 +23,7 @@ class DriveAPI:
     def _get_batch_handler(self) -> BatchHandler:
         """Get a new batch handler instance."""
         if not self.batch_handler:
-            self.batch_handler = BatchHandler(self.service, self.cache)
+            self.batch_handler = BatchHandler(self.service, self.cache, self._increment_request_count)
         return self.batch_handler
 
     def _increment_request_count(self) -> None:
@@ -171,18 +171,19 @@ class DriveAPI:
             f"(avg {avg_batch_size:.1f} files per batch, {self.api_request_count} API requests so far)"
         )
         
-        for i in range(0, len(remaining_ids), BATCH_SIZE):
-            batch_ids = list(remaining_ids)[i:i + BATCH_SIZE]
+        current_batch_size = 0
+        for file_id in remaining_ids:
+            batch_handler.add_metadata_request(file_id)
+            current_batch_size += 1
             
-            # Add requests to batch
-            for file_id in batch_ids:
-                batch_handler.add_metadata_request(file_id)
-            
-            # Process batch results
-            self._process_batch_results(batch_handler, batch_ids, results)
-            
-            # Update statistics
-            self._update_batch_statistics(batch_handler.get_statistics())
+            # Only execute batch when we reach BATCH_SIZE or it's the last batch
+            if current_batch_size >= BATCH_SIZE or file_id == list(remaining_ids)[-1]:
+                # Process batch results
+                self._process_batch_results(batch_handler, list(remaining_ids), results)
+                
+                # Update statistics
+                self._update_batch_statistics(batch_handler.get_statistics())
+                current_batch_size = 0
 
         # Log final batch statistics
         stats = self.get_batch_statistics()

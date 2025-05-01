@@ -11,9 +11,10 @@ from config import BATCH_SIZE, MAX_RETRIES, RETRY_DELAY, logger
 class BatchHandler:
     """Handles batch requests to Google Drive API."""
     
-    def __init__(self, service: Resource, cache: MetadataCache):
+    def __init__(self, service: Resource, cache: MetadataCache, increment_request_count: Callable[[], None]):
         self.service = service
         self.cache = cache
+        self.increment_request_count = increment_request_count
         self.batch = None
         self.results: Dict[str, Dict] = {}
         self._failed_requests: Set[str] = set()
@@ -21,18 +22,21 @@ class BatchHandler:
         self._success_count = 0
         self._failure_count = 0
         self._retry_count = 0
+        self._current_batch_size = 0
         self._init_batch()
 
     def _init_batch(self) -> None:
         """Initialize a new batch request."""
         self.batch = self.service.new_batch_http_request()
+        self._current_batch_size = 0
 
     def add_metadata_request(self, file_id: str) -> None:
         """Add a metadata request to the batch."""
-        if not self.batch:
+        if not self.batch or self._current_batch_size >= BATCH_SIZE:
             self._init_batch()
 
         self._request_count += 1
+        self._current_batch_size += 1
 
         def callback(request_id, response, exception):
             if exception is not None:
@@ -55,10 +59,11 @@ class BatchHandler:
 
     def add_trash_request(self, file_id: str) -> None:
         """Add a trash request to the batch."""
-        if not self.batch:
+        if not self.batch or self._current_batch_size >= BATCH_SIZE:
             self._init_batch()
 
         self._request_count += 1
+        self._current_batch_size += 1
 
         def callback(request_id, response, exception):
             if exception is not None:
@@ -88,6 +93,8 @@ class BatchHandler:
             try:
                 logger.debug(f"Executing batch with {self._request_count} requests (Attempt {attempt + 1}/{MAX_RETRIES})")
                 self.batch.execute()
+                # Count this as a single API request since it's a batch
+                self.increment_request_count()
                 break
             except Exception as e:
                 self._retry_count += 1
