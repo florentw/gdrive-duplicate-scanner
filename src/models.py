@@ -1,6 +1,6 @@
 from typing import List, Dict, Set, Optional
 from utils import get_human_readable_size
-from config import logger
+from src.config import logger
 
 class BaseDuplicate:
     """Base class for duplicate file information."""
@@ -33,12 +33,13 @@ class DuplicateGroup(BaseDuplicate):
         return self.total_size - int(self.files[0].get('size', 0))
     
     def get_parent_folders(self) -> Set[str]:
-        """Get the set of parent folder IDs for all files."""
-        folders = set()
+        """Get all parent folder IDs for files in this group."""
+        parent_ids = set()
         for file in self.files:
-            if 'parents' in file:
-                folders.update(file['parents'])
-        return folders
+            file_meta = self.metadata.get(file['id'])
+            if file_meta and 'parents' in file_meta:
+                parent_ids.update(file_meta['parents'])
+        return parent_ids
     
     def print_info(self) -> None:
         """Print information about the duplicate group."""

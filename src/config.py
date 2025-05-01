@@ -37,6 +37,9 @@ LOG_FILE = 'drive_scanner.log'
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 LOG_LEVEL = logging.INFO
 
+# Create logger
+logger = logging.getLogger('drive_scanner')
+
 def setup_logging():
     """Configure logging for the application."""
     # Create logs directory if it doesn't exist
@@ -60,8 +63,7 @@ def setup_logging():
     logging.getLogger('urllib3').setLevel(logging.WARNING)
     
     # Set our application's logger to INFO
-    app_logger = logging.getLogger('drive_scanner')
-    app_logger.setLevel(LOG_LEVEL)
+    logger.setLevel(LOG_LEVEL)
 
 # Google Drive API scopes
 SCOPES = ['https://www.googleapis.com/auth/drive']

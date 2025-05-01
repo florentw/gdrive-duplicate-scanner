@@ -1,14 +1,11 @@
 import csv
 from datetime import datetime
 from typing import List, Dict
-from drive_api import DriveAPI
-from config import CSV_HEADERS
-from utils import get_human_readable_size
-import logging
-from models import DuplicateGroup
+from src.drive_api import DriveAPI
+from src.config import CSV_HEADERS, logger
+from src.utils import get_human_readable_size
+from src.models import DuplicateGroup
 from tqdm import tqdm
-
-logger = logging.getLogger('drive_scanner')
 
 def generate_csv_filename() -> str:
     """Generate a unique CSV filename with timestamp."""
