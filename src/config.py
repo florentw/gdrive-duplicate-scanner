@@ -2,41 +2,24 @@ import logging
 import sys
 from pathlib import Path
 
-# Configure logging
-LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
-LOG_FILE = 'drive_scanner.log'
-LOG_LEVEL = logging.INFO
+# Configure root logger
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('drive_scanner.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 # Create and configure the drive_scanner logger
 logger = logging.getLogger('drive_scanner')
-logger.setLevel(LOG_LEVEL)
-
-# Remove any existing handlers to prevent duplicates
-logger.handlers = []
-
-# Create file handler
-file_handler = logging.FileHandler(LOG_FILE)
-file_handler.setLevel(LOG_LEVEL)
-file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-logger.addHandler(file_handler)
-
-# Create console handler
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(LOG_LEVEL)
-console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-logger.addHandler(console_handler)
-
-# Prevent propagation to root logger
+logger.setLevel(logging.INFO)
 logger.propagate = False
 
-# Set root logger to WARNING to prevent duplicate messages
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.WARNING)
-
-# Set external library loggers to WARNING level
-logging.getLogger('googleapiclient').setLevel(logging.WARNING)
-logging.getLogger('oauth2client').setLevel(logging.WARNING)
-logging.getLogger('urllib3').setLevel(logging.WARNING)
+# Set external library loggers to WARNING
+for lib in ['googleapiclient', 'oauth2client', 'urllib3']:
+    logging.getLogger(lib).setLevel(logging.WARNING)
 
 # Google Drive API scopes
 SCOPES = ['https://www.googleapis.com/auth/drive']
