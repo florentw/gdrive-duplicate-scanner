@@ -651,8 +651,13 @@ class TestDuplicateScanner(unittest.TestCase):
             # Verify CSV export was called with the duplicate groups
             self.assertTrue(mock_write_csv.called)
 
-    def test_write_to_csv_optimized(self):
+    @patch('src.export.tqdm')
+    def test_write_to_csv_optimized(self, mock_tqdm):
         """Test the optimized CSV export functionality."""
+        # Setup mock progress bar
+        mock_progress = MagicMock()
+        mock_tqdm.return_value.__enter__.return_value = mock_progress
+        
         # Create test data with multiple duplicates
         files = [
             {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'parents': ['folder1']},
@@ -684,6 +689,10 @@ class TestDuplicateScanner(unittest.TestCase):
         self.assertIsNotNone(filename)
         self.assertTrue(os.path.exists(filename))
         
+        # Verify progress bar was used correctly
+        mock_tqdm.assert_called_once_with(total=3, desc="Exporting duplicates", unit="files")
+        self.assertEqual(mock_progress.update.call_count, 3)  # Called once for each file
+        
         # Verify CSV content
         with open(filename, 'r') as f:
             reader = csv.DictReader(f)
@@ -713,8 +722,13 @@ class TestDuplicateScanner(unittest.TestCase):
         # Cleanup
         os.remove(filename)
 
-    def test_write_to_csv_with_missing_metadata(self):
+    @patch('src.export.tqdm')
+    def test_write_to_csv_with_missing_metadata(self, mock_tqdm):
         """Test CSV export with missing metadata."""
+        # Setup mock progress bar
+        mock_progress = MagicMock()
+        mock_tqdm.return_value.__enter__.return_value = mock_progress
+        
         # Create test data with missing metadata
         files = [
             {'id': 'id1', 'name': 'file1.txt', 'size': '1024'},
@@ -737,6 +751,10 @@ class TestDuplicateScanner(unittest.TestCase):
         self.assertIsNotNone(filename)
         self.assertTrue(os.path.exists(filename))
         
+        # Verify progress bar was used correctly
+        mock_tqdm.assert_called_once_with(total=2, desc="Exporting duplicates", unit="files")
+        self.assertEqual(mock_progress.update.call_count, 2)  # Called for both files, even the missing one
+        
         # Verify CSV content
         with open(filename, 'r') as f:
             reader = csv.DictReader(f)
@@ -750,8 +768,13 @@ class TestDuplicateScanner(unittest.TestCase):
         # Cleanup
         os.remove(filename)
 
-    def test_write_to_csv_with_empty_groups(self):
+    @patch('src.export.tqdm')
+    def test_write_to_csv_with_empty_groups(self, mock_tqdm):
         """Test CSV export with empty duplicate groups."""
+        # Setup mock progress bar
+        mock_progress = MagicMock()
+        mock_tqdm.return_value.__enter__.return_value = mock_progress
+        
         # Create empty group
         group = DuplicateGroup([], {})
         
@@ -764,6 +787,10 @@ class TestDuplicateScanner(unittest.TestCase):
         # Verify file was created
         self.assertIsNotNone(filename)
         self.assertTrue(os.path.exists(filename))
+        
+        # Verify progress bar was used correctly
+        mock_tqdm.assert_called_once_with(total=0, desc="Exporting duplicates", unit="files")
+        self.assertEqual(mock_progress.update.call_count, 0)  # Never called for empty group
         
         # Verify CSV content
         with open(filename, 'r') as f:
