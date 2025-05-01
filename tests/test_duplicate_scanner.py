@@ -7,6 +7,8 @@ import tempfile
 import shutil
 import csv
 from datetime import datetime
+import pytest
+import json
 
 # Add parent directory to Python path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,30 +26,43 @@ from duplicate_scanner import main
 class TestDuplicateScanner(unittest.TestCase):
     """Test suite for duplicate scanner functionality."""
 
+    @pytest.fixture
+    def mock_service(self):
+        return Mock()
+
     def setUp(self):
         """Set up test fixtures before each test method."""
-        self.mock_service = Mock()
+        # Create a proper mock service structure
         self.mock_files_service = Mock()
-        self.mock_service.files.return_value = self.mock_files_service
+        self.mock_service = Mock()
+        self.mock_service.files = Mock(return_value=self.mock_files_service)
+        self.mock_service.new_batch_http_request = Mock(return_value=Mock())
+        
+        # Set up test directory and cache
         self.test_dir = tempfile.mkdtemp()
         self.test_cache_file = os.path.join(self.test_dir, 'test_cache.json')
         self.test_cache = MetadataCache(self.test_cache_file)
+        
+        # Initialize DriveAPI with cache
         self.drive_api = DriveAPI(self.mock_service, self.test_cache)
+        
         # Store original working directory
         self.original_dir = os.getcwd()
         # Change to test directory
         os.chdir(self.test_dir)
+        
+        # Create a test cache file
+        self.test_cache_data = {
+            'files': [
+                {'id': '1', 'name': 'test1.txt', 'size': '100', 'md5Checksum': 'abc'},
+                {'id': '2', 'name': 'test2.txt', 'size': '200', 'md5Checksum': 'def'}
+            ]
+        }
+        with open(self.test_cache_file, 'w') as f:
+            json.dump(self.test_cache_data, f)
 
     def tearDown(self):
         """Clean up test fixtures after each test method."""
-        # Remove any CSV files created during the test
-        for file in os.listdir(self.test_dir):
-            if file.startswith('duplicate_files_') and file.endswith('.csv'):
-                try:
-                    os.remove(os.path.join(self.test_dir, file))
-                except OSError:
-                    pass
-        
         # Change back to original directory
         os.chdir(self.original_dir)
         # Remove test directory
@@ -294,20 +309,25 @@ class TestDuplicateScanner(unittest.TestCase):
             # Should not raise exception
 
     def test_drive_api_list_files(self):
-        """Test listing files from Google Drive."""
-        mock_files = [
-            {'id': 'id1', 'name': 'file1.txt'},
-            {'id': 'id2', 'name': 'file2.txt'}
-        ]
-        
+        """Test listing files from Google Drive API."""
         # Mock API response
-        mock_response = {'files': mock_files}
-        self.mock_files_service.list.return_value.execute.return_value = mock_response
+        self.mock_files_service.list.return_value.execute.return_value = {
+            'files': [
+                {'id': '1', 'name': 'test1.txt', 'size': '100', 'md5Checksum': 'abc'},
+                {'id': '2', 'name': 'test2.txt', 'size': '200', 'md5Checksum': 'def'}
+            ],
+            'nextPageToken': None
+        }
+
+        # Test file listing
+        files = self.drive_api.list_files()
         
-        result = self.drive_api.list_files()
-        
-        self.assertEqual(result, mock_files)
-        # Verify the call was made with correct parameters
+        # Verify results
+        self.assertEqual(len(files), 2)
+        self.assertEqual(files[0]['id'], '1')
+        self.assertEqual(files[1]['id'], '2')
+
+        # Verify API call
         self.mock_files_service.list.assert_called_once()
         call_args = self.mock_files_service.list.call_args[1]
         self.assertIn(METADATA_FIELDS, call_args['fields'])

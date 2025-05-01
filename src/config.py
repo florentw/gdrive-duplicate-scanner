@@ -55,4 +55,6 @@ SAVE_INTERVAL_MINUTES = 1  # Save cache every minute
 BATCH_SIZE = 100  # Reduced from 900 to 100 to stay well under Google's limits
 MAX_RETRIES = 3
 RETRY_DELAY = 1  # seconds
+
+# Fields needed for file operations
 METADATA_FIELDS = 'id, name, parents, size, md5Checksum, mimeType, trashed' 
