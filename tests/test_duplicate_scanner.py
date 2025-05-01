@@ -833,6 +833,43 @@ class TestDuplicateScanner(unittest.TestCase):
             result = write_to_csv([group], mock_drive_api)
             self.assertIsNone(result)
 
+    def test_drive_api_batch_size_logging(self):
+        """Test batch size logging in metadata fetching."""
+        # Setup
+        mock_service = MagicMock()
+        api = DriveAPI(mock_service)
+        
+        # Test with different batch sizes
+        test_cases = [
+            ([f'id{i}' for i in range(5)], 1),  # Single batch
+            ([f'id{i}' for i in range(150)], 2),  # Two batches
+            ([f'id{i}' for i in range(250)], 3),  # Three batches
+        ]
+        
+        for file_ids, expected_batches in test_cases:
+            # Mock batch handler
+            mock_batch = MagicMock()
+            mock_batch.execute.return_value = None
+            mock_batch.get_results.return_value = {f'id{i}': {'id': f'id{i}'} for i in range(len(file_ids))}
+            
+            with patch('src.drive_api.BatchHandler', return_value=mock_batch), \
+                 patch('logging.info') as mock_logging:
+                
+                # Call the method
+                api.get_files_metadata_batch(file_ids)
+                
+                # Verify logging was called with correct batch information
+                mock_logging.assert_called_once()
+                log_message = mock_logging.call_args[0][0]
+                
+                # Verify log message contains expected information
+                self.assertIn(str(len(file_ids)), log_message)  # Total files
+                self.assertIn(str(expected_batches), log_message)  # Number of batches
+                self.assertIn('avg', log_message.lower())  # Average batch size
+                
+                # Reset mock for next test case
+                mock_logging.reset_mock()
+
 if __name__ == '__main__':
     unittest.main()
     
