@@ -40,10 +40,28 @@ It uses Google Drive API v3 for accessing and modifying files.
 - Provides detailed folder metadata and statistics
 
 #### CSV Export
-- Exports duplicate pairs to CSV file
-- Includes detailed file metadata
-- Timestamps in filename for tracking different runs
-- Comprehensive file information including paths and sizes
+- Exports duplicate pairs to CSV file with timestamp in filename (e.g., `duplicate_files_20250430_120321.csv`)
+- Includes comprehensive file metadata:
+  - File ID
+  - File name
+  - File size (in bytes and human-readable format)
+  - MD5 hash
+  - MIME type
+  - Creation date
+  - Last modified date
+  - Parent folder ID and name
+  - Full file path
+  - Duplicate group ID
+  - Number of duplicates in the group
+  - Total size of duplicates in the group
+- Sorts files by:
+  1. Duplicate group ID
+  2. File size (largest first)
+  3. Creation date (newest first)
+- Uses batch processing for efficient metadata retrieval
+- Handles missing metadata gracefully
+- Supports large exports with progress bar
+- Atomic file writing to prevent corruption
 
 ## ⚠️ Warning
 Moving files to the trash is irreversible through this script. Be careful when using the `--delete` argument. If you accidentally move a file to the trash, you can manually restore it from the trash in Google Drive.
@@ -115,7 +133,12 @@ The script provides detailed output including:
 - Total wasted space
 - List of folders containing duplicates
 - List of folders containing only duplicates
-- CSV export of duplicate pairs
+- CSV export of duplicate pairs with the following information:
+  - File metadata (ID, name, size, hash, type)
+  - Timestamps (creation, modification)
+  - Folder information (ID, name, path)
+  - Duplicate group statistics
+  - File relationships and hierarchies
 
 ## Running Tests
 
