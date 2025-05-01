@@ -1,10 +1,11 @@
 import csv
 from datetime import datetime
 from typing import List, Dict
-from src.drive_api import DriveAPI
-from src.config import CSV_HEADERS, logger
-from src.utils import get_human_readable_size
-from src.models import DuplicateGroup
+from drive_api import DriveAPI
+from config import CSV_HEADERS
+from utils import get_human_readable_size
+import logging
+from models import DuplicateGroup
 from tqdm import tqdm
 
 def generate_csv_filename() -> str:
@@ -15,7 +16,7 @@ def generate_csv_filename() -> str:
 def write_to_csv(duplicate_groups: List[DuplicateGroup], drive_api: DriveAPI) -> str:
     """Write duplicate file information to a CSV file."""
     filename = generate_csv_filename()
-    logger.info(f"Starting CSV export to {filename} with {len(duplicate_groups)} groups")
+    logging.info(f"Starting CSV export to {filename} with {len(duplicate_groups)} groups")
     
     try:
         with open(filename, 'w', newline='') as csvfile:
@@ -28,6 +29,8 @@ def write_to_csv(duplicate_groups: List[DuplicateGroup], drive_api: DriveAPI) ->
             # Create progress bar
             with tqdm(total=total_files, desc="Exporting duplicates", unit="files") as pbar:
                 for group_id, group in enumerate(duplicate_groups, 1):
+                    logging.debug(f"Processing group {group_id} with {len(group.files)} files")
+                    
                     # Get all parent folder metadata at once to reduce API calls
                     parent_ids = set()
                     for file in group.files:
@@ -43,7 +46,7 @@ def write_to_csv(duplicate_groups: List[DuplicateGroup], drive_api: DriveAPI) ->
                     for i, file in enumerate(group.files):
                         file_meta = group.metadata.get(file['id'])
                         if not file_meta:
-                            logger.warning(f"Missing metadata for file {file['id']} in group {group_id}")
+                            logging.warning(f"Missing metadata for file {file['id']} in group {group_id}")
                             pbar.update(1)
                             continue
                         
@@ -59,7 +62,7 @@ def write_to_csv(duplicate_groups: List[DuplicateGroup], drive_api: DriveAPI) ->
                                 
                             other_meta = group.metadata.get(other_file['id'])
                             if not other_meta:
-                                logger.warning(f"Missing metadata for duplicate file {other_file['id']} in group {group_id}")
+                                logging.warning(f"Missing metadata for duplicate file {other_file['id']} in group {group_id}")
                                 continue
                                 
                             other_parent_id = other_meta.get('parents', [''])[0]
@@ -93,8 +96,8 @@ def write_to_csv(duplicate_groups: List[DuplicateGroup], drive_api: DriveAPI) ->
                         rows_written += 1
                         pbar.update(1)
                         
-            logger.info(f"CSV export completed. Wrote {rows_written} rows to {filename}")
+            logging.info(f"CSV export completed. Wrote {rows_written} rows to {filename}")
             return filename
     except IOError as e:
-        logger.error(f"Error writing to CSV file: {e}")
+        logging.error(f"Error writing to CSV file: {e}")
         return None 

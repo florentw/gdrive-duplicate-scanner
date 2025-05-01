@@ -4,7 +4,7 @@ import hashlib
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
-from config import CACHE_FILE, CACHE_EXPIRY_HOURS, SAVE_INTERVAL_MINUTES
+from config import CACHE_FILE, SAVE_INTERVAL_MINUTES
 
 def get_cache_key():
     """Generate a unique cache key based on the credentials file."""
@@ -24,32 +24,8 @@ class MetadataCache:
         self._temp_file = f"{cache_file}.tmp"
         self._cache = {}
         self._last_save = datetime.now()
-        self._last_cleanup = datetime.now()
         self._modified = False
         self._load()
-
-    def _cleanup_expired(self) -> None:
-        """Remove expired entries from cache."""
-        if datetime.now() - self._last_cleanup < timedelta(hours=CACHE_EXPIRY_HOURS):
-            return
-
-        expired_keys = []
-        for key, value in self._cache.items():
-            if isinstance(value, dict) and 'timestamp' in value:
-                try:
-                    timestamp = datetime.fromisoformat(value['timestamp'])
-                    if datetime.now() - timestamp > timedelta(hours=CACHE_EXPIRY_HOURS):
-                        expired_keys.append(key)
-                except (ValueError, TypeError):
-                    expired_keys.append(key)
-
-        if expired_keys:
-            for key in expired_keys:
-                self._cache.pop(key, None)
-            self._modified = True
-            self._save(force=True)
-
-        self._last_cleanup = datetime.now()
 
     def _save(self, force: bool = False) -> None:
         """Save cache to disk if needed."""
@@ -103,12 +79,6 @@ class MetadataCache:
                     
                     self._cache = data.get('files', {})
                     self._last_save = datetime.fromisoformat(data.get('timestamp', datetime.now().isoformat()))
-                    
-                    # Check cache expiry
-                    if self._last_save and datetime.now() - self._last_save > timedelta(hours=CACHE_EXPIRY_HOURS):
-                        self._cache = {}  # Clear the cache
-                        self._last_save = None
-                        self._save(force=True)  # Save empty cache
         except Exception as e:
             logging.error(f"Failed to load cache: {e}")
             self._cache = {}
@@ -116,23 +86,16 @@ class MetadataCache:
 
     def get(self, key: str) -> Any:
         """Retrieve item from cache."""
-        self._cleanup_expired()  # Check for expired entries
         return self._cache.get(key)
 
     def set(self, key: str, value: Any) -> None:
         """Store single item in cache."""
-        if isinstance(value, dict):
-            value['timestamp'] = datetime.now().isoformat()
         self._cache[key] = value
         self._modified = True
         self._save()
 
     def update(self, items: Dict[str, Any]) -> None:
         """Store multiple items in cache."""
-        timestamp = datetime.now().isoformat()
-        for key, value in items.items():
-            if isinstance(value, dict):
-                value['timestamp'] = timestamp
         self._cache.update(items)
         self._modified = True
         self._save()
@@ -152,12 +115,10 @@ class MetadataCache:
 
     def get_all_files(self) -> List[Dict]:
         """Get all cached files."""
-        self._cleanup_expired()
         return self._cache.get('all_files', [])
 
     def get_all_folders(self) -> List[Dict]:
         """Get all cached folders."""
-        self._cleanup_expired()
         return self._cache.get('all_folders', [])
 
     def cache_files(self, files: List[Dict]) -> None:

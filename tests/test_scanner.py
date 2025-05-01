@@ -1,5 +1,10 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
+import os
+import json
+from datetime import datetime
+from src.cache import MetadataCache
+from src.drive_api import DriveAPI
 from src.scanner import BaseDuplicateScanner, DuplicateScanner, DuplicateScannerWithFolders
 from src.models import DuplicateGroup, DuplicateFolder
 
@@ -61,6 +66,97 @@ class TestBaseDuplicateScanner(unittest.TestCase):
         self.assertEqual(len(self.scanner.duplicate_groups), 1)
         self.assertEqual(len(self.scanner.duplicate_groups[0].files), 2)
 
+class TestMetadataCache(unittest.TestCase):
+    def setUp(self):
+        self.test_cache_file = 'test_cache.json'
+        self.test_cache = MetadataCache(self.test_cache_file)
+
+    def tearDown(self):
+        if os.path.exists(self.test_cache_file):
+            os.remove(self.test_cache_file)
+
+    def test_basic_cache_operations(self):
+        """Test basic cache operations."""
+        # Test setting and getting values
+        self.test_cache.set('test_key', 'test_value')
+        self.assertEqual(self.test_cache.get('test_key'), 'test_value')
+        
+        # Test updating multiple values
+        self.test_cache.update({'key1': 'value1', 'key2': 'value2'})
+        self.assertEqual(self.test_cache.get('key1'), 'value1')
+        self.assertEqual(self.test_cache.get('key2'), 'value2')
+        
+        # Test removing values
+        self.test_cache.remove(['key1'])
+        self.assertIsNone(self.test_cache.get('key1'))
+        
+        # Test clearing cache
+        self.test_cache.clear()
+        self.assertIsNone(self.test_cache.get('test_key'))
+        self.assertIsNone(self.test_cache.get('key2'))
+
+    def test_cache_persistence(self):
+        """Test that cache persists to disk."""
+        # Add some data
+        test_data = {'test_key': 'test_value'}
+        self.test_cache.update(test_data)
+        
+        # Force save to disk
+        self.test_cache._save(force=True)
+        
+        # Create new cache instance
+        new_cache = MetadataCache(self.test_cache_file)
+        
+        # Verify data was loaded
+        self.assertEqual(new_cache.get('test_key'), 'test_value')
+
+    def test_cache_key_mismatch(self):
+        """Test cache behavior when credentials change."""
+        # Add some data
+        self.test_cache.set('test_key', 'test_value')
+        
+        # Mock get_cache_key to return different value
+        with patch('src.cache.get_cache_key', return_value='different_key'):
+            new_cache = MetadataCache(self.test_cache_file)
+            self.assertIsNone(new_cache.get('test_key'))
+
+    def test_cache_file_errors(self):
+        """Test cache operations with file system errors."""
+        # Test cache load with invalid file
+        with patch('builtins.open', side_effect=IOError("File error")):
+            cache = MetadataCache(self.test_cache_file)
+            self.assertIsNone(cache.get('any_key'))
+
+        # Test cache save with invalid file
+        self.test_cache.set('test_key', 'test_value')
+        with patch('builtins.open', side_effect=IOError("File error")):
+            self.test_cache._save(force=True)
+            # Cache should still work in memory
+            self.assertEqual(self.test_cache.get('test_key'), 'test_value')
+
+    def test_cache_context_manager(self):
+        """Test cache context manager functionality."""
+        with MetadataCache(self.test_cache_file) as cache:
+            cache.set('test_key', 'test_value')
+            self.assertEqual(cache.get('test_key'), 'test_value')
+        
+        # Cache should be saved after context exit
+        new_cache = MetadataCache(self.test_cache_file)
+        self.assertEqual(new_cache.get('test_key'), 'test_value')
+
+    def test_cache_files_and_folders(self):
+        """Test caching of files and folders."""
+        test_files = [{'id': '1', 'name': 'file1'}, {'id': '2', 'name': 'file2'}]
+        test_folders = [{'id': '3', 'name': 'folder1'}, {'id': '4', 'name': 'folder2'}]
+        
+        # Test caching files
+        self.test_cache.cache_files(test_files)
+        self.assertEqual(self.test_cache.get_all_files(), test_files)
+        
+        # Test caching folders
+        self.test_cache.cache_folders(test_folders)
+        self.assertEqual(self.test_cache.get_all_folders(), test_folders)
+
 class TestDuplicateScanner(unittest.TestCase):
     def setUp(self):
         self.drive_api = Mock()
@@ -68,6 +164,7 @@ class TestDuplicateScanner(unittest.TestCase):
         self.scanner = DuplicateScanner(self.drive_api, self.cache)
 
     def test_scan_with_cache(self):
+        """Test scanner using cached data."""
         test_files = [
             {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain'},
             {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain'}
@@ -80,6 +177,7 @@ class TestDuplicateScanner(unittest.TestCase):
         self.drive_api.list_files.assert_not_called()
 
     def test_scan_without_cache(self):
+        """Test scanner when cache is empty."""
         test_files = [
             {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain'},
             {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain'}
@@ -100,6 +198,7 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
         self.scanner = DuplicateScannerWithFolders(self.drive_api, self.cache)
 
     def test_scan_with_cache(self):
+        """Test scanner with folders using cached data."""
         test_files = [
             {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']},
             {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']}
@@ -118,6 +217,7 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
         self.drive_api.list_all_files_and_folders.assert_not_called()
 
     def test_scan_without_cache(self):
+        """Test scanner with folders when cache is empty."""
         test_files = [
             {'id': '1', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']},
             {'id': '2', 'size': '100', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1']}
