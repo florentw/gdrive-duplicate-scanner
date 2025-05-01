@@ -167,3 +167,18 @@ drive_metadata_cache.json.bak
 drive_scanner.log
 drive_scanner.log.bak
 drive_duplicates_*.csv
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+*.log.*
+duplicate_files_*.csv
+drive_scanner.log*
