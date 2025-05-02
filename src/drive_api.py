@@ -1,10 +1,11 @@
 import logging
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from googleapiclient.discovery import Resource
 from cache import MetadataCache
 from batch import BatchHandler
 from config import BATCH_SIZE, METADATA_FIELDS, logger
 from tqdm import tqdm
+from googleapiclient.errors import HttpError
 
 class DriveAPI:
     """Wrapper for Google Drive API operations."""
@@ -67,28 +68,72 @@ class DriveAPI:
             return [], None
 
     def list_files(self, force_refresh: bool = False) -> List[Dict]:
-        """List all non-trashed files in Google Drive."""
-        if not force_refresh:
-            cached_files = self.cache.get_all_files()
-            if cached_files:
-                return cached_files
-
-        files = []
-        page_token = None
-        
-        with tqdm(desc="Scanning Drive", unit=" files", unit_scale=True) as pbar:
-            while True:
-                new_files, page_token = self._fetch_files_page(page_token)
-                files.extend(new_files)
-                pbar.update(len(new_files))
-                
-                if not page_token:
-                    break
-
-        if files:
-            self.cache.cache_files(files)
+        """List all files in Google Drive."""
+        try:
+            # Get files from API
+            files = []
+            page_token = None
             
-        return files
+            with tqdm(desc="Scanning Drive", unit=" files", unit_scale=True) as pbar:
+                while True:
+                    # Build query parameters
+                    params = {
+                        'q': 'trashed=false',  # Exclude files in trash
+                        'fields': f'nextPageToken, files({METADATA_FIELDS})',
+                        'pageSize': 1000,  # Maximum allowed by API
+                        'spaces': 'drive',  # Only search in Drive, not Photos or other spaces
+                        'pageToken': page_token
+                    }
+                    
+                    # Execute request and increment counter only for actual API calls
+                    if force_refresh or not hasattr(self, '_cached_files'):
+                        results = self.service.files().list(**params).execute()
+                        self._increment_request_count()
+                    else:
+                        results = {'files': self._cached_files, 'nextPageToken': None}
+                    
+                    if 'files' in results:
+                        files.extend(results['files'])
+                        pbar.update(len(results['files']))
+                    
+                    page_token = results.get('nextPageToken')
+                    if not page_token:
+                        break
+            
+            # Cache the results
+            self._cached_files = files
+            return files
+            
+        except (HttpError, Exception) as error:
+            logger.error(f"Error listing files: {error}")
+            return []
+
+    def list_all_files_and_folders(self) -> Tuple[List[Dict], List[Dict]]:
+        """List all files and folders in Google Drive.
+        
+        Returns:
+            Tuple containing:
+            - List of file metadata dictionaries
+            - List of folder metadata dictionaries
+        """
+        try:
+            all_items = self.list_files()
+            
+            # Separate files and folders
+            files = []
+            folders = []
+            
+            for item in all_items:
+                if item.get('mimeType') == 'application/vnd.google-apps.folder':
+                    folders.append(item)
+                else:
+                    files.append(item)
+            
+            return files, folders
+            
+        except Exception as e:
+            logger.error(f"Error listing files and folders: {e}")
+            return [], []
 
     def get_file_metadata(self, file_id: str) -> Optional[dict]:
         """Get metadata for a single file."""

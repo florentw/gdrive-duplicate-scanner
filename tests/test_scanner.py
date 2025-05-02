@@ -489,5 +489,105 @@ class TestDuplicateScannerWithFolders(unittest.TestCase):
         self.assertEqual(len(folder2.total_files), 2)
         self.assertTrue(folder2.check_if_duplicate_only())
 
+    def test_duplicate_folder_size_calculation(self):
+        """Test that folder sizes are calculated correctly."""
+        # Setup test data with known sizes
+        test_files = [
+            {'id': '1', 'size': '1024', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1'], 'name': 'file1.txt'},
+            {'id': '2', 'size': '1024', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1'], 'name': 'file2.txt'},
+            {'id': '3', 'size': '2048', 'md5Checksum': 'def456', 'mimeType': 'text/plain', 'parents': ['folder1'], 'name': 'file3.txt'},
+            {'id': '4', 'size': '2048', 'md5Checksum': 'def456', 'mimeType': 'text/plain', 'parents': ['folder2'], 'name': 'file4.txt'}
+        ]
+        test_folders = [
+            {'id': 'folder1', 'name': 'Mixed Content Folder'},
+            {'id': 'folder2', 'name': 'Single Duplicate Folder'}
+        ]
+        
+        # Mock API responses
+        self.drive_api.list_files.return_value = test_files
+        self.cache.get_all_files.return_value = test_files
+        self.cache.get_all_folders.return_value = test_folders
+        
+        # Run scan
+        self.scanner.scan()
+        
+        # Verify folder1 (contains both duplicate pairs)
+        folder1 = self.scanner.duplicate_files_in_folders['folder1']
+        # In folder1, we have:
+        # - Two 1024-byte files with the same MD5 (abc123)
+        # - One 2048-byte file that's a duplicate of a file in folder2
+        # Total size should be 1024 + 2048 = 3072 bytes
+        self.assertEqual(folder1.total_size, 4096)  # Both files are counted since they're duplicates
+        
+        # Verify folder2 (single duplicate file)
+        folder2 = self.scanner.duplicate_files_in_folders['folder2']
+        # In folder2, we have one 2048-byte file that's a duplicate of a file in folder1
+        self.assertEqual(folder2.total_size, 2048)  # One 2048-byte duplicate file
+
+    def test_duplicate_group_size_calculation(self):
+        """Test that duplicate group sizes and wasted space are calculated correctly."""
+        # Setup test data with known sizes
+        test_files = [
+            {'id': '1', 'size': '1024', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1'], 'name': 'file1.txt'},
+            {'id': '2', 'size': '1024', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder2'], 'name': 'file2.txt'},
+            {'id': '3', 'size': '2048', 'md5Checksum': 'def456', 'mimeType': 'text/plain', 'parents': ['folder1'], 'name': 'file3.txt'},
+            {'id': '4', 'size': '2048', 'md5Checksum': 'def456', 'mimeType': 'text/plain', 'parents': ['folder2'], 'name': 'file4.txt'}
+        ]
+        test_folders = [
+            {'id': 'folder1', 'name': 'Test Folder 1'},
+            {'id': 'folder2', 'name': 'Test Folder 2'}
+        ]
+        
+        # Mock API responses
+        self.drive_api.list_files.return_value = test_files
+        self.cache.get_all_files.return_value = test_files
+        self.cache.get_all_folders.return_value = test_folders
+        
+        # Run scan
+        self.scanner.scan()
+        
+        # Verify results
+        self.assertEqual(len(self.scanner.duplicate_groups), 2)  # Two groups of duplicates
+        
+        # Find groups by size
+        group_1024 = next(g for g in self.scanner.duplicate_groups if int(g.files[0]['size']) == 1024)
+        group_2048 = next(g for g in self.scanner.duplicate_groups if int(g.files[0]['size']) == 2048)
+        
+        # Verify 1024-byte group
+        self.assertEqual(group_1024.total_size, 2048)  # Two 1024-byte files
+        self.assertEqual(group_1024.wasted_space, 1024)  # One duplicate = size of one file
+        
+        # Verify 2048-byte group
+        self.assertEqual(group_2048.total_size, 4096)  # Two 2048-byte files
+        self.assertEqual(group_2048.wasted_space, 2048)  # One duplicate = size of one file
+
+    def test_zero_size_files_handling(self):
+        """Test that zero-size files are handled correctly."""
+        # Setup test data with zero-size files
+        test_files = [
+            {'id': '1', 'size': '0', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1'], 'name': 'empty1.txt'},
+            {'id': '2', 'size': '0', 'md5Checksum': 'abc123', 'mimeType': 'text/plain', 'parents': ['folder1'], 'name': 'empty2.txt'},
+            {'id': '3', 'size': '1024', 'md5Checksum': 'def456', 'mimeType': 'text/plain', 'parents': ['folder1'], 'name': 'nonempty.txt'}
+        ]
+        test_folders = [
+            {'id': 'folder1', 'name': 'Test Folder'}
+        ]
+        
+        # Mock API responses
+        self.drive_api.list_files.return_value = test_files
+        self.cache.get_all_files.return_value = test_files
+        self.cache.get_all_folders.return_value = test_folders
+        
+        # Run scan
+        self.scanner.scan()
+        
+        # Verify that zero-size files are filtered out
+        self.assertEqual(len(self.scanner.duplicate_groups), 0)  # No duplicate groups (zero-size files are ignored)
+        
+        # Verify folder
+        folder = self.scanner.duplicate_files_in_folders.get('folder1')
+        if folder:
+            self.assertEqual(folder.total_size, 0)  # No duplicate files (zero-size files are ignored)
+
 if __name__ == '__main__':
     unittest.main() 
