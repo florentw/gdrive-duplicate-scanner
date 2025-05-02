@@ -5,6 +5,7 @@ from cache import MetadataCache
 from batch import BatchHandler
 from config import BATCH_SIZE, METADATA_FIELDS, logger
 from tqdm import tqdm
+from googleapiclient.errors import HttpError
 
 class DriveAPI:
     """Wrapper for Google Drive API operations."""
@@ -73,32 +74,38 @@ class DriveAPI:
             files = []
             page_token = None
             
-            while True:
-                # Build query parameters
-                params = {
-                    'q': 'trashed=false',  # Exclude files in trash
-                    'fields': f'nextPageToken, files({METADATA_FIELDS})',
-                    'pageSize': 1000,  # Maximum allowed by API
-                    'spaces': 'drive',  # Only search in Drive, not Photos or other spaces
-                    'pageToken': page_token
-                }
-                
-                # Execute request
-                results = self.service.files().list(**params).execute()
-                self._increment_request_count()
-                
-                # Add files from this page
-                files.extend(results.get('files', []))
-                
-                # Get next page token
-                page_token = results.get('nextPageToken')
-                if not page_token:
-                    break
+            with tqdm(desc="Scanning Drive", unit=" files", unit_scale=True) as pbar:
+                while True:
+                    # Build query parameters
+                    params = {
+                        'q': 'trashed=false',  # Exclude files in trash
+                        'fields': f'nextPageToken, files({METADATA_FIELDS})',
+                        'pageSize': 1000,  # Maximum allowed by API
+                        'spaces': 'drive',  # Only search in Drive, not Photos or other spaces
+                        'pageToken': page_token
+                    }
+                    
+                    # Execute request and increment counter only for actual API calls
+                    if force_refresh or not hasattr(self, '_cached_files'):
+                        results = self.service.files().list(**params).execute()
+                        self._increment_request_count()
+                    else:
+                        results = {'files': self._cached_files, 'nextPageToken': None}
+                    
+                    if 'files' in results:
+                        files.extend(results['files'])
+                        pbar.update(len(results['files']))
+                    
+                    page_token = results.get('nextPageToken')
+                    if not page_token:
+                        break
             
+            # Cache the results
+            self._cached_files = files
             return files
             
-        except Exception as e:
-            logger.error(f"Error listing files: {e}")
+        except (HttpError, Exception) as error:
+            logger.error(f"Error listing files: {error}")
             return []
 
     def list_all_files_and_folders(self) -> Tuple[List[Dict], List[Dict]]:
