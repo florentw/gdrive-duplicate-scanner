@@ -90,18 +90,27 @@ class DuplicateFolder(BaseDuplicate):
     def total_size(self) -> int:
         """Calculate total size of all duplicate files in the folder."""
         if self._total_size is None:
-            self._total_size = sum(
-                int(f.get('size', 0))
-                for f in self.files
-                if f.get('id') in self.duplicate_file_ids
-            )
+            # For each duplicate file in the folder, add its size
+            self._total_size = 0
+            for file in self.files:
+                if file.get('id') in self.duplicate_file_ids:
+                    # Only count one instance of each duplicate file
+                    md5 = file.get('md5Checksum', '')
+                    if md5:
+                        # Find all files with this MD5 in this folder
+                        same_md5_files = [f for f in self.files 
+                                        if f.get('md5Checksum') == md5 
+                                        and f.get('id') in self.duplicate_file_ids]
+                        if same_md5_files:
+                            # Only add the size once per duplicate group
+                            self._total_size += int(same_md5_files[0].get('size', 0))
         return self._total_size
 
     def print_info(self) -> None:
         """Print information about the folder and its duplicate files."""
-        logger.info(f"\nFolder: {self.folder_info.get('name', 'Unknown')} ({self.folder_id})")
-        size_mb = self.total_size / (1024 * 1024)
-        logger.info(f"Contains {len(self.duplicate_file_ids)} duplicate files, total size: {size_mb:.2f} MB")
+        print(f"\n{self.folder_info.get('name', 'Unknown')}:")
+        print(f"- Contains {len(self.duplicate_file_ids)} duplicate files")
+        print(f"- Total size: {get_human_readable_size(self.total_size)}")
         for file in self.files:
             if file.get('id') in self.duplicate_file_ids:
-                logger.info(f"  - {file.get('name', 'Unknown')} ({file.get('id', 'No ID')})") 
+                print(f"  - {file.get('name', 'Unknown')} ({file.get('id', 'No ID')})") 
