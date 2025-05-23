@@ -167,6 +167,7 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
                         folder_files[parent_id].add(file['id'])
         
         # Analyze each folder
+        all_files_metadata_dict = {file['id']: file for file in files}
         with tqdm(total=len(folders), desc="Analyzing folders", unit="folder") as pbar:
             for folder in folders:
                 folder_id = folder['id']
@@ -176,7 +177,8 @@ class DuplicateScannerWithFolders(BaseDuplicateScanner):
                         folder_obj = DuplicateFolder(
                             folder_id,
                             folder,
-                            duplicate_files
+                            duplicate_files,
+                            all_files_metadata_dict
                         )
                         folder_obj.total_files = folder_total_files.get(folder_id, set())
                         self.duplicate_files_in_folders[folder_id] = folder_obj

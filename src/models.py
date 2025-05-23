@@ -50,12 +50,13 @@ class DuplicateGroup(BaseDuplicate):
 class DuplicateFolder(BaseDuplicate):
     """Represents a folder containing duplicate files."""
     
-    def __init__(self, folder_id: str, folder_info: Dict, duplicate_file_ids: Set[str]):
+    def __init__(self, folder_id: str, folder_info: Dict, duplicate_file_ids: Set[str], all_files_metadata: Dict[str, Dict]):
         super().__init__([], {})  # Initialize base class
         self.folder_id = folder_id
         self.folder_info = folder_info
         self.metadata = folder_info  # Set metadata to folder_info for compatibility
         self.duplicate_file_ids = duplicate_file_ids
+        self.all_files_metadata = all_files_metadata
         self._total_size = None
         self.files = []  # Will be populated later with actual files
         self.total_files = set()  # Initialize empty set for total files
@@ -90,20 +91,11 @@ class DuplicateFolder(BaseDuplicate):
     def total_size(self) -> int:
         """Calculate total size of all duplicate files in the folder."""
         if self._total_size is None:
-            # For each duplicate file in the folder, add its size
             self._total_size = 0
-            for file in self.files:
-                if file.get('id') in self.duplicate_file_ids:
-                    # Only count one instance of each duplicate file
-                    md5 = file.get('md5Checksum', '')
-                    if md5:
-                        # Find all files with this MD5 in this folder
-                        same_md5_files = [f for f in self.files 
-                                        if f.get('md5Checksum') == md5 
-                                        and f.get('id') in self.duplicate_file_ids]
-                        if same_md5_files:
-                            # Only add the size once per duplicate group
-                            self._total_size += int(same_md5_files[0].get('size', 0))
+            for file_id in self.duplicate_file_ids:
+                file_metadata = self.all_files_metadata.get(file_id)
+                if file_metadata:
+                    self._total_size += int(file_metadata.get('size', 0))
         return self._total_size
 
     def print_info(self) -> None:
