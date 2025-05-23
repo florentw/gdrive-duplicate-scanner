@@ -9,6 +9,7 @@ import csv
 from datetime import datetime
 import pytest
 import json
+import io
 
 # Add parent directory to Python path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,7 +22,10 @@ from src.scanner import DuplicateScanner, DuplicateScannerWithFolders
 from src.export import write_to_csv
 from src.utils import get_human_readable_size
 from src.config import BATCH_SIZE, METADATA_FIELDS, logger, MAX_RETRIES
-from duplicate_scanner import main
+# Import main from src for TestDuplicateScannerCLI
+from src.duplicate_scanner import main as src_main 
+# Import the root duplicate_scanner module to test its main
+import duplicate_scanner as root_duplicate_scanner
 
 class TestDuplicateScanner(unittest.TestCase):
     """Test suite for duplicate scanner functionality."""
@@ -670,44 +674,53 @@ class TestDuplicateScanner(unittest.TestCase):
         self.assertEqual(len(scanner.duplicate_groups[0].files), 2)
 
     def test_main_script_flow(self):
-        """Test the main script flow with mocked dependencies."""
-        # Create mock objects
-        mock_service = MagicMock()
-        mock_drive_api = MagicMock()
-        mock_cache = MagicMock()
-        
-        # Setup test data
-        test_files = [
-            {'id': 'id1', 'name': 'file1.txt', 'size': '1024', 'md5Checksum': 'abc'},
-            {'id': 'id2', 'name': 'file2.txt', 'size': '1024', 'md5Checksum': 'abc'}
-        ]
-        mock_cache.get_all_files.return_value = test_files
-        
-        # Setup mock drive_api
-        mock_drive_api_instance = MagicMock()
-        mock_drive_api_instance.list_files.return_value = test_files
-        mock_drive_api.return_value = mock_drive_api_instance
-        
-        # Patch dependencies and command-line arguments
-        with patch('sys.argv', ['duplicate_scanner.py']), \
-             patch('duplicate_scanner.get_service', return_value=mock_service), \
-             patch('duplicate_scanner.DriveAPI', mock_drive_api), \
-             patch('duplicate_scanner.MetadataCache', return_value=mock_cache), \
-             patch('duplicate_scanner.write_to_csv') as mock_write_csv:
-            
-            # Run main function
-            main()
-            
-            # Verify DriveAPI was created with service
-            mock_drive_api.assert_called_once_with(mock_service)
-            
-            # Verify scanner was created with cache
-            mock_cache.get_all_files.assert_called_once()
-            
-            # Verify CSV export was called with the duplicate groups
-            self.assertTrue(mock_write_csv.called)
+        """Test the main script flow for the root duplicate_scanner.py."""
+        mock_service_return = MagicMock() # What get_service returns
 
-    @patch('src.export.tqdm')
+        # Mock for DriveAPI constructor and its instance
+        mock_drive_api_constructor = MagicMock(spec=DriveAPI) 
+        mock_drive_api_instance = MagicMock()
+        mock_drive_api_constructor.return_value = mock_drive_api_instance
+
+        # Mock for MetadataCache constructor and its instance
+        mock_metadata_cache_constructor = MagicMock(spec=MetadataCache)
+        mock_metadata_cache_instance = MagicMock()
+        mock_metadata_cache_constructor.return_value = mock_metadata_cache_instance
+        
+        # Mock for DuplicateScannerWithFolders constructor and its instance
+        mock_scanner_constructor = MagicMock(spec=DuplicateScannerWithFolders)
+        mock_scanner_instance = MagicMock()
+        mock_scanner_instance.duplicate_groups = [MagicMock(files=[{'size': '1024', 'name':'file1.txt'}], wasted_space=0)] 
+        mock_scanner_instance.duplicate_files_in_folders = {} 
+        mock_scanner_instance.duplicate_only_folders = {}   
+        mock_scanner_constructor.return_value = mock_scanner_instance
+
+        mock_write_csv_func = MagicMock()
+
+        # Patch targets are for 'duplicate_scanner' (the root module)
+        # sys.argv is set to ensure no actual CLI args interfere, or to pass specific test args
+        with patch('sys.argv', ['duplicate_scanner.py']), \
+             patch('duplicate_scanner.get_service', return_value=mock_service_return) as patched_get_service, \
+             patch('duplicate_scanner.DriveAPI', mock_drive_api_constructor) as patched_drive_api_constructor, \
+             patch('duplicate_scanner.MetadataCache', mock_metadata_cache_constructor) as patched_metadata_cache_constructor, \
+             patch('duplicate_scanner.DuplicateScannerWithFolders', mock_scanner_constructor) as patched_scanner_constructor, \
+             patch('duplicate_scanner.write_to_csv', mock_write_csv_func) as patched_write_csv, \
+             patch('builtins.print') as mock_root_print: # Mock print for the root script
+            
+            root_duplicate_scanner.main() 
+            
+            patched_get_service.assert_called_once_with()
+            patched_drive_api_constructor.assert_called_once_with(mock_service_return)
+            patched_metadata_cache_constructor.assert_called_once_with() 
+            patched_scanner_constructor.assert_called_once_with(mock_drive_api_instance, mock_metadata_cache_instance)
+            mock_scanner_instance.scan.assert_called_once_with() 
+            
+            if mock_scanner_instance.duplicate_groups:
+                patched_write_csv.assert_called_once_with(mock_scanner_instance.duplicate_groups, mock_drive_api_instance)
+            else:
+                patched_write_csv.assert_not_called()
+
+    @patch('src.export.tqdm') # This should be fine as 'export' is 'src.export' which is used by both root and src main CSV exports
     def test_write_to_csv_optimized(self, mock_tqdm):
         """Test the optimized CSV export functionality."""
         # Setup mock progress bar
@@ -1063,6 +1076,302 @@ class TestDuplicateScanner(unittest.TestCase):
             self.assertEqual(stats['failed_requests'], len(file_ids))
             self.assertEqual(stats['retry_count'], MAX_RETRIES)
 
+    def test_get_files_metadata_batch_multiple_batches(self):
+        """Test get_files_metadata_batch with input forcing multiple batches."""
+        file_ids = [f'id{i}' for i in range(BATCH_SIZE + 5)]
+        
+        # Mock BatchHandler instance and its methods
+        mock_bh_instance = MagicMock(spec=BatchHandler)
+        
+        # Simulate two batches
+        responses_batch1 = {f'id{i}': {'id': f'id{i}', 'name': f'file{i}'} for i in range(BATCH_SIZE)}
+        responses_batch2 = {f'id{i}': {'id': f'id{i}', 'name': f'file{i}'} for i in range(BATCH_SIZE, BATCH_SIZE + 5)}
+
+        # Configure side effects for get_results and get_failed_requests
+        # First call (batch 1)
+        mock_bh_instance.get_results.side_effect = [responses_batch1, responses_batch2]
+        mock_bh_instance.get_failed_requests.side_effect = [set(), set()] # No failures in this test
+        stats_batch1 = {'total_requests': BATCH_SIZE, 'successful_requests': BATCH_SIZE, 'failed_requests': 0, 'retry_count': 0}
+        stats_batch2 = {'total_requests': 5, 'successful_requests': 5, 'failed_requests': 0, 'retry_count': 0}
+        mock_bh_instance.get_statistics.side_effect = [stats_batch1, stats_batch2]
+
+        def mock_get_cached_metadata_none(ids_to_check):
+            return {}, set(ids_to_check) # Ensure all IDs are processed as uncached
+
+        with patch.object(self.drive_api, '_get_cached_metadata', side_effect=mock_get_cached_metadata_none) as mock_cache_check, \
+             patch('src.drive_api.BatchHandler', return_value=mock_bh_instance) as mock_batch_constructor:
+            # Reset api_request_count for this specific test on the existing self.drive_api instance
+            self.drive_api.api_request_count = 0 # Reset this as get_file_metadata (called by retry) increments it.
+            self.drive_api._total_batches_processed = 0
+            self.drive_api._total_batch_requests = 0
+            self.drive_api._total_batch_successes = 0
+            self.drive_api._total_batch_failures = 0
+            self.drive_api._total_batch_retries = 0
+            # Ensure batch_handler is reset for this test so a new one (our mock) is created
+            self.drive_api.batch_handler = None
+
+            results = self.drive_api.get_files_metadata_batch(file_ids)
+
+            # Check that BatchHandler constructor was called (indirectly via _get_batch_handler)
+            # It might be called once and reused, or multiple times if logic resets it.
+            # For this test, we focus on execute calls.
+            self.assertGreaterEqual(mock_batch_constructor.call_count, 1)
+            
+            # Check execute was called for each batch
+            self.assertEqual(mock_bh_instance.execute.call_count, 2)
+            
+            # Verify combined results
+            expected_results = {**responses_batch1, **responses_batch2}
+            self.assertEqual(results, expected_results)
+            self.assertEqual(len(results), BATCH_SIZE + 5)
+
+    def test_get_files_metadata_batch_partial_failure_and_retry(self):
+        """Test get_files_metadata_batch with partial failures and retries."""
+        file_ids = ['id1', 'id2', 'id3', 'id4', 'id5']
+        
+        mock_bh_instance = MagicMock(spec=BatchHandler)
+        
+        # Batch 1 results: id1, id2 success; id3 fails
+        batch1_success = {'id1': {'id': 'id1', 'name': 'file1'}, 'id2': {'id': 'id2', 'name': 'file2'}}
+        batch1_failed_set = {'id3'}
+        
+        mock_bh_instance.get_results.return_value = batch1_success
+        mock_bh_instance.get_failed_requests.return_value = batch1_failed_set
+        mock_bh_instance.get_statistics.return_value = {'total_requests': 3, 'successful_requests': 2, 'failed_requests': 1, 'retry_count': 0}
+
+        # Mock for DriveAPI.get_file_metadata (the retry mechanism)
+        # id3 will be retried: succeed
+        # Let's assume id4, id5 were part of a different scenario or not in the first batch for simplicity of this test.
+        # We are testing the retry of 'id3'.
+        
+        # If get_file_metadata is called for 'id3', it will now raise an exception.
+        def mock_individual_get_metadata(file_id_to_check):
+            if file_id_to_check == 'id3':
+                raise Exception("Simulated retry error for id3")
+            # This mock should only be called for 'id3' in this test's logic.
+            # If called for 'id1' or 'id2', it means they weren't handled by the batch mock as expected.
+            self.fail(f"Unexpected call to get_file_metadata with {file_id_to_check}")
+            return None # Should not be reached
+
+        def mock_get_cached_metadata_none_for_retry(ids_to_check):
+            return {}, set(ids_to_check)
+
+        with patch.object(self.drive_api, '_get_cached_metadata', side_effect=mock_get_cached_metadata_none_for_retry) as mock_cache_check_retry, \
+             patch('src.drive_api.BatchHandler', return_value=mock_bh_instance) as mock_bh_constructor_retry, \
+             patch.object(self.drive_api, 'get_file_metadata', side_effect=mock_individual_get_metadata) as mock_retry_get_metadata, \
+             patch('src.drive_api.logging.error') as mock_drive_api_logging_error: # Patch logger in drive_api
+            
+            # Reset api_request_count for this specific test on the existing self.drive_api instance
+            self.drive_api.api_request_count = 0 
+            self.drive_api._total_batches_processed = 0
+            self.drive_api._total_batch_requests = 0
+            self.drive_api._total_batch_successes = 0
+            self.drive_api._total_batch_failures = 0
+            self.drive_api._total_batch_retries = 0
+            self.drive_api.batch_handler = None
+
+
+            # We only pass IDs that would go into the first batch for this specific scenario
+            results = self.drive_api.get_files_metadata_batch(['id1', 'id2', 'id3'])
+            
+            mock_bh_instance.execute.assert_called_once()
+            mock_retry_get_metadata.assert_called_once_with('id3')
+            
+            # Expected: id1, id2 from batch success. id3 failed retry, so not present.
+            expected_results = {
+                'id1': {'id': 'id1', 'name': 'file1'},
+                'id2': {'id': 'id2', 'name': 'file2'},
+            }
+            self.assertEqual(results, expected_results)
+            # Verify that the specific error log from _handle_failed_requests was called
+            logged_error_correctly = False
+            for call_args_tuple in mock_drive_api_logging_error.call_args_list:
+                # Ensure call_args_tuple.args is not empty and contains the log message string
+                if call_args_tuple.args and isinstance(call_args_tuple.args[0], str):
+                    log_message = call_args_tuple.args[0]
+                    if f"Failed to get metadata for file id3" in log_message and "Simulated retry error for id3" in log_message:
+                        logged_error_correctly = True
+                        break
+            self.assertTrue(logged_error_correctly, "Expected error log for failed retry of id3 was not found or incorrect.")
+
+    def test_move_files_to_trash_batch_multiple_batches(self):
+        """Test move_files_to_trash_batch with input forcing multiple batches."""
+        file_ids = [f'id{i}' for i in range(BATCH_SIZE + 5)]
+        
+        mock_bh_instance = MagicMock(spec=BatchHandler)
+        
+        # Simulate two batches for trash operation
+        # get_results for trash returns {file_id: True/False}
+        trash_results_batch1 = {f'id{i}': True for i in range(BATCH_SIZE)}
+        trash_results_batch2 = {f'id{i}': True for i in range(BATCH_SIZE, BATCH_SIZE + 5)}
+
+        mock_bh_instance.get_results.side_effect = [trash_results_batch1, trash_results_batch2]
+        mock_bh_instance.get_failed_requests.side_effect = [set(), set()] # No failures
+
+        with patch('src.drive_api.BatchHandler', return_value=mock_bh_instance):
+            self.drive_api.batch_handler = None # Ensure new mock handler is used
+            results = self.drive_api.move_files_to_trash_batch(file_ids)
+            
+            self.assertEqual(mock_bh_instance.execute.call_count, 2)
+            
+            expected_results = {f'id{i}': True for i in range(BATCH_SIZE + 5)}
+            self.assertEqual(results, expected_results)
+
+    def test_move_files_to_trash_batch_partial_failure(self):
+        """Test move_files_to_trash_batch with partial failures."""
+        file_ids = ['id1', 'id2', 'id3_fail'] # id3_fail will fail
+        
+        mock_bh_instance = MagicMock(spec=BatchHandler)
+        
+        # Batch results: id1, id2 success (True); id3_fail is missing from get_results
+        batch_success = {'id1': True, 'id2': True} 
+        batch_failed_set = {'id3_fail'}
+        
+        mock_bh_instance.get_results.return_value = batch_success
+        mock_bh_instance.get_failed_requests.return_value = batch_failed_set
+
+        with patch('src.drive_api.BatchHandler', return_value=mock_bh_instance):
+            self.drive_api.batch_handler = None # Ensure new mock handler is used
+            results = self.drive_api.move_files_to_trash_batch(file_ids)
+            
+            mock_bh_instance.execute.assert_called_once()
+            
+            expected_results = {
+                'id1': True,
+                'id2': True,
+                'id3_fail': False # Failed items should be marked as False
+            }
+            self.assertEqual(results, expected_results)
+
 if __name__ == '__main__':
     unittest.main()
-    
+
+class TestDuplicateScannerCLI(unittest.TestCase):
+    """Test suite for the command-line interface of duplicate_scanner.py."""
+
+    @patch('src.duplicate_scanner.get_service') # Patches for src_main
+    @patch('src.duplicate_scanner.DriveAPI')   # Patches for src_main
+    @patch('src.duplicate_scanner.DuplicateScanner') # Patches for src_main
+    @patch('src.duplicate_scanner.write_to_csv')     # Patches for src_main
+    @patch('builtins.print')
+    def test_main_basic_run(self, mock_print, mock_write_to_csv, mock_Scanner_class, mock_DriveAPI_class, mock_get_service): # For src_main
+        """Test basic run with no arguments."""
+        # Setup mocks
+        mock_service_instance = MagicMock()
+        mock_get_service.return_value = mock_service_instance
+        mock_drive_api_instance = MagicMock()
+        mock_DriveAPI_class.return_value = mock_drive_api_instance
+        mock_scanner_instance = MagicMock()
+        mock_scanner_instance.scan.return_value = [MagicMock(files=[1, 2], wasted_space=1024)] # Simulate some duplicates
+        mock_Scanner_class.return_value = mock_scanner_instance
+
+        with patch('sys.argv', ['src/duplicate_scanner.py']):
+            src_main() # Call the aliased main from src
+
+        mock_get_service.assert_called_once()
+        mock_DriveAPI_class.assert_called_once_with(mock_service_instance)
+        mock_Scanner_class.assert_called_once_with(mock_drive_api_instance)
+        mock_scanner_instance.scan.assert_called_once_with(delete=False, force_refresh=False)
+        mock_write_to_csv.assert_called_once()
+        # Check for summary print statements
+        self.assertTrue(any("Found 1 duplicate groups" in call_args[0][0] for call_args in mock_print.call_args_list if call_args[0]))
+        self.assertTrue(any("Total duplicate files: 1" in call_args[0][0] for call_args in mock_print.call_args_list if call_args[0]))
+        self.assertTrue(any("Total wasted space: 1.00 KB" in call_args[0][0] for call_args in mock_print.call_args_list if call_args[0]))
+
+
+    @patch('src.duplicate_scanner.get_service')
+    @patch('src.duplicate_scanner.DriveAPI')   # For src_main
+    @patch('src.duplicate_scanner.DuplicateScanner') # For src_main
+    @patch('src.duplicate_scanner.write_to_csv')     # For src_main
+    @patch('builtins.print')
+    def test_main_refresh_cache_argument(self, mock_print, mock_write_to_csv, mock_Scanner_class, mock_DriveAPI_class, mock_get_service): # For src_main
+        """Test --refresh-cache argument."""
+        mock_service_instance = MagicMock()
+        mock_get_service.return_value = mock_service_instance
+        mock_drive_api_instance = MagicMock()
+        mock_DriveAPI_class.return_value = mock_drive_api_instance
+        mock_scanner_instance = MagicMock()
+        mock_scanner_instance.scan.return_value = []
+        mock_Scanner_class.return_value = mock_scanner_instance
+
+        with patch('sys.argv', ['src/duplicate_scanner.py', '--refresh-cache']):
+            src_main() # Call the aliased main from src
+        
+        mock_scanner_instance.scan.assert_called_once_with(delete=False, force_refresh=True)
+
+
+    @patch('src.duplicate_scanner.get_service')
+    @patch('src.duplicate_scanner.DriveAPI')   # For src_main
+    @patch('src.duplicate_scanner.DuplicateScanner') # For src_main
+    @patch('src.duplicate_scanner.write_to_csv')     # For src_main
+    @patch('builtins.print')
+    def test_main_delete_argument(self, mock_print, mock_write_to_csv, mock_Scanner_class, mock_DriveAPI_class, mock_get_service): # For src_main
+        """Test --delete argument."""
+        mock_service_instance = MagicMock()
+        mock_get_service.return_value = mock_service_instance
+        mock_drive_api_instance = MagicMock()
+        mock_DriveAPI_class.return_value = mock_drive_api_instance
+        mock_scanner_instance = MagicMock()
+        mock_scanner_instance.scan.return_value = [] # No duplicates for simplicity
+        mock_Scanner_class.return_value = mock_scanner_instance
+
+        with patch('sys.argv', ['src/duplicate_scanner.py', '--delete']):
+            src_main() # Call the aliased main from src
+
+        mock_scanner_instance.scan.assert_called_once_with(delete=True, force_refresh=False)
+
+
+    @patch('src.duplicate_scanner.get_service')      # For src_main
+    @patch('src.duplicate_scanner.logging.error') # For src_main
+    @patch('builtins.print') # To see if any other print occurs
+    def test_main_authentication_failure(self, mock_print, mock_logging_error, mock_get_service): # For src_main
+        """Test authentication failure."""
+        mock_get_service.return_value = None
+
+        with patch('sys.argv', ['src/duplicate_scanner.py']):
+            src_main() # Call the aliased main from src
+        
+        mock_get_service.assert_called_once()
+        mock_logging_error.assert_called_with("Failed to get Google Drive service")
+        # Ensure no other output like summary if auth fails
+        self.assertFalse(any("Found" in call_args[0][0] for call_args in mock_print.call_args_list if call_args[0]))
+
+
+    @patch('sys.stderr', new_callable=io.StringIO) # Capture stderr
+    @patch('sys.exit') # To prevent test runner from exiting
+    def test_main_invalid_argument(self, mock_exit, mock_stderr): # For src_main
+        """Test with an invalid argument."""
+        with patch('sys.argv', ['src/duplicate_scanner.py', '--invalid-option']):
+            try:
+                src_main() # Call the aliased main from src
+            except SystemExit: # Argparse calls sys.exit on error
+                pass
+        
+        self.assertTrue("unrecognized arguments: --invalid-option" in mock_stderr.getvalue())
+        mock_exit.assert_called_with(2)
+
+    # Note: src/duplicate_scanner.py currently implements --delete and --refresh-cache.
+    # The subtask mentioned testing for --no-cache, --folders, --no-export.
+    # test_main_refresh_cache_argument covers a similar functionality to --no-cache.
+    # --folders and --no-export are not implemented in src/duplicate_scanner.py.
+    # If they were, tests would follow a similar pattern to the ones above.
+    # For example, for --no-export:
+    # @patch('src.duplicate_scanner.get_service')
+    # @patch('src.duplicate_scanner.DriveAPI')
+    # @patch('src.duplicate_scanner.DuplicateScanner')
+    # @patch('src.duplicate_scanner.write_to_csv') # Key mock
+    # def test_main_no_export(self, mock_write_csv, ...):
+    #    with patch('sys.argv', ['src/duplicate_scanner.py', '--no-export']):
+    #        main()
+    #    mock_write_csv.assert_not_called()
+
+    # For --folders:
+    # @patch('src.duplicate_scanner.get_service')
+    # @patch('src.duplicate_scanner.DriveAPI')
+    # @patch('src.duplicate_scanner.DuplicateScannerWithFolders') # Key mock
+    # @patch('src.duplicate_scanner.DuplicateScanner') # Original
+    # def test_main_folders(self, mock_original_scanner, mock_folder_scanner, ...):
+    #    with patch('sys.argv', ['src/duplicate_scanner.py', '--folders']):
+    #        main()
+    #    mock_folder_scanner.assert_called_once()
+    #    mock_original_scanner.assert_not_called()
