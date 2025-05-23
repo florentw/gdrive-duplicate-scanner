@@ -363,14 +363,18 @@ class TestDuplicateScanner(unittest.TestCase):
         folder_id = 'folder1'
         folder_meta = {'id': 'folder1', 'name': 'Test Folder'}
         duplicate_files = {'file1', 'file2'}
+        all_files_metadata = {
+            'file1': {'id': 'file1', 'size': '1024'},
+            'file2': {'id': 'file2', 'size': '2048'}
+        }
         
-        folder = DuplicateFolder(folder_id, folder_meta, duplicate_files)
+        folder = DuplicateFolder(folder_id, folder_meta, duplicate_files, all_files_metadata)
         
         # Test initial state
         self.assertEqual(folder.id, folder_id)
         self.assertEqual(folder.metadata, folder_meta)
         self.assertEqual(folder.duplicate_files, duplicate_files)
-        self.assertEqual(folder.total_size, 0)
+        self.assertEqual(folder.total_size, 3072) # 1024 + 2048
         
         # Test metadata update
         new_metadata = {
