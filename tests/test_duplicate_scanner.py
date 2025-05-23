@@ -424,6 +424,80 @@ class TestDuplicateScanner(unittest.TestCase):
             self.assertEqual(len(scanner.duplicate_groups), 1)  # One group of duplicates
             self.assertEqual(len(scanner.duplicate_groups[0].files), 2)  # Two files in the group
 
+    def test_scan_cache_empty_and_finds_duplicates(self):
+        """Test DuplicateScanner.scan() when cache is initially empty."""
+        # Ensure cache starts empty for this test's perspective
+        self.test_cache.clear() # Clear any setup data
+        self.test_cache._load() # Reload to confirm it's empty
+
+        mock_api_files = [
+            {'id': 'id1', 'name': 'file1.txt', 'md5Checksum': 'hash1', 'size': '1024', 'mimeType': 'text/plain'},
+            {'id': 'id2', 'name': 'file2.txt', 'md5Checksum': 'hash1', 'size': '1024', 'mimeType': 'text/plain'},
+            {'id': 'id3', 'name': 'file3.txt', 'md5Checksum': 'hash2', 'size': '2048', 'mimeType': 'text/plain'}
+        ]
+        
+        # Mock DriveAPI methods
+        self.drive_api.list_files = Mock(return_value=mock_api_files)
+        
+        # Mock cache methods
+        self.test_cache.get_all_files = Mock(return_value=None) # Simulate empty cache
+        self.test_cache.cache_files = Mock()
+
+        scanner = DuplicateScanner(self.drive_api, self.test_cache)
+        
+        # Spy on _scan_for_duplicates to ensure it's called correctly
+        with patch.object(scanner, '_scan_for_duplicates', wraps=scanner._scan_for_duplicates) as mock_scan_internal:
+            scanner.scan()
+            
+            self.test_cache.get_all_files.assert_called_once()
+            self.drive_api.list_files.assert_called_once()
+            self.test_cache.cache_files.assert_called_once_with(mock_api_files)
+            mock_scan_internal.assert_called_once_with(mock_api_files)
+            
+            # Check that duplicate groups are formed correctly
+            self.assertEqual(len(scanner.duplicate_groups), 1)
+            self.assertEqual(len(scanner.duplicate_groups[0].files), 2)
+            self.assertCountEqual([f['id'] for f in scanner.duplicate_groups[0].files], ['id1', 'id2'])
+
+    def test_scan_force_refresh(self):
+        """Test DuplicateScanner.scan() with force_refresh=True."""
+        # Initial cache content (from setUp)
+        # self.test_cache_data = {
+        #     'files': [
+        #         {'id': '1', 'name': 'test1.txt', 'size': '100', 'md5Checksum': 'abc'},
+        #         {'id': '2', 'name': 'test2.txt', 'size': '200', 'md5Checksum': 'def'}
+        #     ]
+        # }
+        # So, self.test_cache.get_all_files() would normally return these.
+
+        new_mock_api_files = [
+            {'id': 'id_A', 'name': 'fileA.txt', 'md5Checksum': 'hashA', 'size': '500', 'mimeType': 'text/plain'},
+            {'id': 'id_B', 'name': 'fileB.txt', 'md5Checksum': 'hashA', 'size': '500', 'mimeType': 'text/plain'}, # Duplicate
+        ]
+
+        self.drive_api.list_files = Mock(return_value=new_mock_api_files)
+        self.test_cache.clear = Mock(wraps=self.test_cache.clear) # Spy on clear
+        self.test_cache.cache_files = Mock()
+        # get_all_files will be called by scan, but its result is ignored due to force_refresh leading to clear()
+
+        scanner = DuplicateScanner(self.drive_api, self.test_cache)
+        
+        with patch.object(scanner, '_scan_for_duplicates', wraps=scanner._scan_for_duplicates) as mock_scan_internal:
+            scanner.scan(force_refresh=True)
+            
+            self.test_cache.clear.assert_called_once()
+            self.drive_api.list_files.assert_called_once_with(force_refresh=True)
+            self.test_cache.cache_files.assert_called_once_with(new_mock_api_files)
+            mock_scan_internal.assert_called_once_with(new_mock_api_files)
+
+            self.assertEqual(len(scanner.duplicate_groups), 1)
+            self.assertCountEqual([f['id'] for f in scanner.duplicate_groups[0].files], ['id_A', 'id_B'])
+
+    # The original test_duplicate_scanner is removed as its functionality is covered by
+    # the new more specific tests (test_scan_cache_empty_and_finds_duplicates, test_scan_force_refresh)
+    # and the existing test_scanner_with_cache, in conjunction with the detailed tests
+    # for BaseDuplicateScanner._scan_for_duplicates in test_scanner.py.
+
     def test_batch_handler_operations(self):
         """Test BatchHandler operations and contract."""
         # Setup

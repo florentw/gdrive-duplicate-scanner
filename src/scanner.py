@@ -1,10 +1,10 @@
 from typing import List, Dict, Set, Optional
 from collections import defaultdict
-from drive_api import DriveAPI
-from models import DuplicateGroup, DuplicateFolder
-from utils import get_human_readable_size
-from cache import MetadataCache
-from config import logger
+from .drive_api import DriveAPI
+from .models import DuplicateGroup, DuplicateFolder
+from .utils import get_human_readable_size
+from .cache import MetadataCache
+from ..config import logger # Assuming config.py is in the parent directory of src
 from tqdm import tqdm
 
 class BaseDuplicateScanner:
